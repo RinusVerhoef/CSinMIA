@@ -1,4 +1,4 @@
-import nibabel as nib
+import SimpleITK as sitk
 import numpy as np
 from pathlib import Path
 
@@ -20,15 +20,15 @@ class ProstateLoader:
                 seg_path = patient_dir / "t2_anatomy_reader1.nii.gz"
 
                 if img_path.exists() and seg_path.exists():
-                    img = nib.load(str(img_path)).get_fdata()
-                    seg = nib.load(str(seg_path)).get_fdata()
+                    img = sitk.ReadImage(str(img_path), sitk.sitkFloat32)
+                    seg = sitk.ReadImage(str(seg_path), sitk.sitkFloat32)
 
-                    mask = (seg == 1).astype(np.uint8)
+                    mask = seg == 1
 
                     images.append(img)
                     segmentations.append(mask)
 
         print("Loaded volumes:", len(images))
-        print("Example shape:", images[0].shape)
+        print("Example shape:", images[0].GetSize())
 
         return images, segmentations
