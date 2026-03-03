@@ -1,3 +1,13 @@
+# registration_efthimis.py
+# This version is meant to RUN and to SHOW the real elastix error if something fails.
+# It does:
+# 1) Load prostate158_train with your ProstateLoader (SimpleITK images + seg==1 masks).
+# 2) Split first N cases as atlas, rest as test.
+# 3) Register each atlas -> fixed using DEFAULT elastix parameter maps (translation + affine).
+# 4) Warp atlas masks using Transformix with nearest-neighbor interpolation.
+# 5) Print NCC and Dice for each atlas, then majority-vote top-K by NCC.
+# 6) Always writes elastix logs to CSinMIA/elastix_logs/... so you can inspect failures.
+
 from pathlib import Path
 import numpy as np
 import SimpleITK as sitk
@@ -6,6 +16,9 @@ import matplotlib.pyplot as plt
 from prostateLoader import ProstateLoader
 
 
+# -----------------------------
+# Metrics
+# -----------------------------
 def ncc(a, b, eps=1e-8):
     a = a.astype(np.float32).ravel()
     b = b.astype(np.float32).ravel()
@@ -21,6 +34,9 @@ def dice(a, b, eps=1e-8):
     return float((2.0 * inter) / (a.sum() + b.sum() + eps))
 
 
+# -----------------------------
+# Warp masks with nearest-neighbor
+# -----------------------------
 def warp_mask_nearest(moving_mask: sitk.Image, transform_parameter_map):
     tmap = transform_parameter_map
     for m in tmap:
@@ -38,28 +54,17 @@ def warp_mask_nearest(moving_mask: sitk.Image, transform_parameter_map):
     return out
 
 
-def sanitize(pm):
-    # In your TransformParameters.1.txt the line is:
-    # (InitialTransformParameterFileName "./TransformParameters.0.txt")
-    # Make it self-contained:
-    if "InitialTransformParameterFileName" in pm:
-        pm["InitialTransformParameterFileName"] = ["NoInitialTransform"]
-    return pm
-
-
 # -----------------------------
 # Paths
 # -----------------------------
 PROJECT_ROOT = Path(__file__).resolve().parent
 DATA_ROOT = PROJECT_ROOT / "prostate158_train" / "train"
 
-PM0 = PROJECT_ROOT / "TransformParameters.0.txt"
-PM1 = PROJECT_ROOT / "TransformParameters.1.txt"
-
 assert DATA_ROOT.exists(), f"Missing dataset folder: {DATA_ROOT}"
-assert PM0.exists(), f"Missing parameter file: {PM0}"
-assert PM1.exists(), f"Missing parameter file: {PM1}"
 
+LOG_ROOT = Path(r"C:\temp\elastix_logs")
+LOG_ROOT.mkdir(parents=True, exist_ok=True)
+print("Writing elastix logs to:", LOG_ROOT)
 
 # -----------------------------
 # Load data
@@ -76,56 +81,70 @@ test_masks = masks[atlas_size:]
 fixed_img = test_images[0]
 fixed_mask = test_masks[0]
 
-fixed_np = sitk.GetArrayFromImage(fixed_img)
-fixed_mask_np = sitk.GetArrayFromImage(fixed_mask)
+fixed_np = sitk.GetArrayFromImage(fixed_img)        # (Z,Y,X)
+fixed_mask_np = sitk.GetArrayFromImage(fixed_mask)  # (Z,Y,X)
 slice_idx = fixed_np.shape[0] // 2
 
 
 # -----------------------------
-# Register each atlas -> fixed, warp masks
+# Register each atlas -> fixed, warp mask, score
 # -----------------------------
 warped_masks = []
-scores = []  # (i, ncc, dice)
+scores = []  # (atlas_idx, ncc, dice)
 
 for i, (moving_img, moving_mask) in enumerate(zip(atlas_images, atlas_masks)):
+    run_dir = LOG_ROOT / f"atlas_{i:02d}_to_fixed"
+    run_dir.mkdir(parents=True, exist_ok=True)
+
     elx = sitk.ElastixImageFilter()
     elx.SetFixedImage(fixed_img)
     elx.SetMovingImage(moving_img)
 
-    pm0 = sanitize(sitk.ReadParameterFile(str(PM0)))
-    pm1 = sanitize(sitk.ReadParameterFile(str(PM1)))
+    # Write logs so errors are visible and inspectable
+    elx.SetOutputDirectory(str(run_dir))
+    elx.LogToConsoleOn()
+    elx.LogToFileOn()
 
-    elx.SetParameterMap(pm0)
-    elx.AddParameterMap(pm1)
+    # DEFAULT registration models (this should run if SimpleElastix is OK)
+    pm_translation = sitk.GetDefaultParameterMap("translation")
+    pm_affine = sitk.GetDefaultParameterMap("affine")
+    pm_affine["MaximumNumberOfIterations"] = ["256"]
 
-    elx.LogToConsoleOff()
-    elx.Execute()
+    elx.SetParameterMap(pm_translation)
+    elx.AddParameterMap(pm_affine)
+
+    try:
+        elx.Execute()
+    except RuntimeError:
+        print("\nElastix failed. Open this folder and read elastix.log:")
+        print(run_dir)
+        raise
 
     reg_img = elx.GetResultImage()
     tmap = elx.GetTransformParameterMap()
 
     reg_np = sitk.GetArrayFromImage(reg_img)
-    s_ncc = ncc(fixed_np, reg_np)
+    score_ncc = ncc(fixed_np, reg_np)
 
     warped = warp_mask_nearest(moving_mask, tmap)
     warped_np = sitk.GetArrayFromImage(warped)
-    s_dice = dice(warped_np, fixed_mask_np)
+    score_dice = dice(warped_np, fixed_mask_np)
 
     warped_masks.append(warped_np)
-    scores.append((i, s_ncc, s_dice))
+    scores.append((i, score_ncc, score_dice))
 
-    print(f"Atlas {i:02d}: NCC={s_ncc:.4f}, Dice={s_dice:.4f}")
+    print(f"Atlas {i:02d}: NCC={score_ncc:.4f}, Dice={score_dice:.4f} | logs: {run_dir}")
 
 
 # -----------------------------
-# Fuse top-K by NCC
+# Fuse top-K by NCC (majority vote)
 # -----------------------------
 K = min(5, len(scores))
 top = sorted(scores, key=lambda x: x[1], reverse=True)[:K]
 top_idx = [t[0] for t in top]
 print("Top-K atlases by NCC:", top_idx)
 
-stack = np.stack([warped_masks[i] for i in top_idx], axis=0)
+stack = np.stack([warped_masks[i] for i in top_idx], axis=0)  # (K,Z,Y,X)
 fused = (stack.sum(axis=0) >= (K / 2)).astype(np.uint8)
 
 fused_dice = dice(fused, fixed_mask_np)
