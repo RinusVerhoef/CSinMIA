@@ -1,0 +1,31 @@
+(AutomaticTransformInitialization "true")
+(AutomaticTransformInitializationMethod "GeometricalCenter")
+
+(AutomaticParameterEstimation "true")
+(AutomaticScalesEstimation "true")
+
+(Transform "AffineTransform")
+(Registration "MultiResolutionRegistration")
+(Optimizer "AdaptiveStochasticGradientDescent")
+
+(Metric "AdvancedNormalizedCorrelation")
+(ImageSampler "Random")
+(NumberOfSpatialSamples 4096)
+(NewSamplesEveryIteration "true")
+(CheckNumberOfSamples "true")
+(MaximumNumberOfSamplingAttempts 1)
+
+(NumberOfResolutions 4)
+(MaximumNumberOfIterations 256)
+
+(Interpolator "LinearInterpolator")
+(ResampleInterpolator "FinalBSplineInterpolator")
+(FinalBSplineInterpolationOrder 3)
+
+(WriteResultImage "false")
+(DefaultPixelValue 0)
+(ResultImageFormat "nii")
+
+(WriteIterationInfo "false")
+(IterationInfoFileName "IterationInfo")
+(IterationInfoWriteInterval 1)
