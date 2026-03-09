@@ -99,10 +99,11 @@ for i, img in enumerate(top_reg):
 t4 = time.perf_counter()
 
 print("___________________________________________")
-print(f"Loading the images      : {t1 - t0:.3f} s")
-print(f"Affine registrations    : {t2 - t1:.3f} s")
-print(f"Preselection            : {t3 - t2:.3f} s")
-print(f"Plotting                : {t4 - t3:.3f} s")
-print(f"Total time              : {t4 - t0:.3f} s")
+print(f"Loading the images      : {(t1 - t0)//60:.0f}m {(t1 - t0)%60:.2f}s")
+print(f"Affine registrations    : {(t2 - t1)//60:.0f}m {(t2 - t1)%60:.2f}s")
+print(f"Preselection            : {(t3 - t2)//60:.0f}m {(t3 - t2)%60:.2f}s")
+print(f"Plotting                : {(t4 - t3)//60:.0f}m {(t4 - t3)%60:.2f}s")
+print("_____________________________________")
+print(f"Total time              : {(t4 - t0)//60:.0f}m {(t4 - t0)%60:.2f}s")
 
 plt.show()
