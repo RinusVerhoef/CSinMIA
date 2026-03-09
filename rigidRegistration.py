@@ -3,7 +3,6 @@ from prostateLoader import ProstateLoader
 import matplotlib.pyplot as plt
 
 import SimpleITK as sitk
-import numpy as np
 import os, re
 import time
 
@@ -11,7 +10,7 @@ import time
 def final_metric_from_elastix_log():
     log_path = "elastix.log"
     if not os.path.exists(log_path):
-        raise FileNotFoundError(f"No elastix.log found in {results_dir}")
+        raise FileNotFoundError(f"No elastix.log found in current dir")
 
     pat = re.compile(r"Final metric value\s*=\s*([-+]?\d*\.?\d+(?:[eE][-+]?\d+)?)")
     metric = None

@@ -1,3 +1,8 @@
 __pycache__/*
 prostate158_train
 .venv
+TransformParameters.1.txt
+TransformParameters.0.txt
+elastix.log
+result.0.nii
+__pycache__
