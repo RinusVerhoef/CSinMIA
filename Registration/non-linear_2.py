@@ -1,4 +1,5 @@
 from pathlib import Path
+import time
 import math
 import numpy as np
 import SimpleITK as sitk
@@ -17,11 +18,12 @@ OUT_ROOT = Path(r"C:\temp\nonlinear_registration_test")
 
 
 # ------------------------------------------------------------
-# Settings
+# Settings, same style as his script
 # ------------------------------------------------------------
 ATLAS_SIZE = 50
+PRESELECTION_SIZE = 5
+VISUALISATION_SLICE = 15
 TEST_IMAGE_LOCAL_INDEX = 1
-TOP_K = 5
 
 
 # ------------------------------------------------------------
@@ -101,6 +103,7 @@ def vote_fusion(masks: list[sitk.Image]) -> sitk.Image:
     arrs = [sitk.GetArrayFromImage(binarize(m)).astype(np.uint8) for m in masks]
     stack = np.stack(arrs, axis=0)
     votes = stack.sum(axis=0)
+
     threshold = math.ceil(len(masks) / 2)
     fused = (votes >= threshold).astype(np.uint8)
 
@@ -118,8 +121,10 @@ def register_affine_then_bspline(
     out_dir: Path,
 ) -> tuple[sitk.Image, Path]:
     ensure_dir(out_dir)
+    ensure_dir(out_dir / "affine_stage")
+    ensure_dir(out_dir / "bspline_stage")
 
-    # Affine
+    # Affine stage
     elx1 = sitk.ElastixImageFilter()
     elx1.SetFixedImage(fixed_img)
     elx1.SetMovingImage(moving_img)
@@ -132,7 +137,7 @@ def register_affine_then_bspline(
 
     affine_tp = latest_tp(out_dir / "affine_stage")
 
-    # Bspline
+    # Nonlinear Bspline stage
     bspline_pm = sitk.ReadParameterFile(str(BSPLINE_PARAM))
     bspline_pm["InitialTransformParameterFileName"] = [str(affine_tp).replace("\\", "/")]
     bspline_pm["HowToCombineTransforms"] = ["Compose"]
@@ -191,70 +196,79 @@ def warp_mask(mask_img: sitk.Image, final_tp: Path, out_dir: Path) -> sitk.Image
 # Main
 # ------------------------------------------------------------
 def main():
+    t0 = time.perf_counter()
+
     ensure_dir(OUT_ROOT)
 
     loader = ProstateLoader(str(ROOT))
-    images, masks = loader.LoadData()
+    images, segmen = loader.LoadData()
 
-    atlas_images = images[:ATLAS_SIZE]
-    atlas_masks = masks[:ATLAS_SIZE]
+    atlas_images = images[0:ATLAS_SIZE]
+    atlas_segmen = segmen[0:ATLAS_SIZE]
 
     test_images = images[ATLAS_SIZE:]
-    test_masks = masks[ATLAS_SIZE:]
+    test_segmen = segmen[ATLAS_SIZE:]
+
+    t1 = time.perf_counter()
 
     fixed_img = test_images[TEST_IMAGE_LOCAL_INDEX]
-    gt_mask = test_masks[TEST_IMAGE_LOCAL_INDEX]
+    gt_mask = test_segmen[TEST_IMAGE_LOCAL_INDEX]
     global_test_idx = ATLAS_SIZE + TEST_IMAGE_LOCAL_INDEX
 
     print(f"Using test image global index: {global_test_idx}")
 
-    atlas_results = []
+    metrics = []
+    reg_results = []
+    reg_segmen = []
+    atlas_indices = []
 
-    for atlas_idx in range(ATLAS_SIZE):
-        print(f"Registering atlas {atlas_idx:03d} -> test {global_test_idx:03d}")
+    for idx, moving_img in enumerate(atlas_images):
+        print(f"Registering atlas {idx:03d} -> test {global_test_idx:03d}")
 
-        pair_dir = ensure_dir(OUT_ROOT / f"atlas_{atlas_idx:03d}_to_test_{global_test_idx:03d}")
+        pair_dir = ensure_dir(OUT_ROOT / f"atlas_{idx:03d}_to_test_{global_test_idx:03d}")
 
         try:
             registered_img, final_tp = register_affine_then_bspline(
                 fixed_img=fixed_img,
-                moving_img=atlas_images[atlas_idx],
+                moving_img=moving_img,
                 out_dir=pair_dir,
             )
 
             warped_mask = warp_mask(
-                mask_img=atlas_masks[atlas_idx],
+                mask_img=atlas_segmen[idx],
                 final_tp=final_tp,
                 out_dir=pair_dir / "mask_warp",
             )
 
-            sim = normalized_cross_correlation(fixed_img, registered_img)
+            metric = normalized_cross_correlation(fixed_img, registered_img)
 
-            atlas_results.append({
-                "atlas_idx": atlas_idx,
-                "similarity": sim,
-                "registered_img": registered_img,
-                "warped_mask": warped_mask,
-            })
+            metrics.append(metric)
+            reg_results.append(registered_img)
+            reg_segmen.append(warped_mask)
+            atlas_indices.append(idx)
 
         except Exception as e:
-            print(f"atlas {atlas_idx:03d} failed: {e}")
+            print(f"atlas {idx:03d} failed: {e}")
             with (pair_dir / "FAILED.txt").open("w", encoding="utf-8") as f:
                 f.write(str(e))
 
-    if len(atlas_results) == 0:
+    t2 = time.perf_counter()
+
+    if len(metrics) == 0:
         print("No successful registrations.")
         return
 
-    atlas_results.sort(key=lambda x: x["similarity"], reverse=True)
+    results = list(zip(metrics, atlas_indices, reg_results, reg_segmen))
+    results_sorted = sorted(results, key=lambda t: t[0], reverse=True)
 
-    with (OUT_ROOT / "atlas_ranking.csv").open("w", encoding="utf-8") as f:
-        f.write("rank,atlas_idx,similarity\n")
-        for rank, r in enumerate(atlas_results, start=1):
-            f.write(f"{rank},{r['atlas_idx']},{r['similarity']:.6f}\n")
+    top_results = results_sorted[:PRESELECTION_SIZE]
 
-    top_results = atlas_results[:TOP_K]
-    top_masks = [r["warped_mask"] for r in top_results]
+    top_metrics = [r[0] for r in top_results]
+    top_indices = [r[1] for r in top_results]
+    top_reg = [r[2] for r in top_results]
+    top_masks = [r[3] for r in top_results]
+
+    t3 = time.perf_counter()
 
     fused = vote_fusion(top_masks)
     sitk.WriteImage(fused, str(OUT_ROOT / "fused_mask_topk.nii.gz"))
@@ -264,47 +278,76 @@ def main():
     jacc = jaccard_score(fused, gt_mask)
     hd = hausdorff_distance_mm(fused, gt_mask)
 
+    with (OUT_ROOT / "atlas_ranking.csv").open("w", encoding="utf-8") as f:
+        f.write("rank,atlas_idx,ncc\n")
+        for rank, row in enumerate(results_sorted, start=1):
+            f.write(f"{rank},{row[1]},{row[0]:.6f}\n")
+
     with (OUT_ROOT / "summary.txt").open("w", encoding="utf-8") as f:
         f.write(f"test_image_global_index = {global_test_idx}\n")
         f.write(f"atlas_size = {ATLAS_SIZE}\n")
-        f.write(f"top_k = {TOP_K}\n")
+        f.write(f"preselection_size = {PRESELECTION_SIZE}\n")
         f.write(f"dice = {dice:.6f}\n")
         f.write(f"jaccard = {jacc:.6f}\n")
         f.write(f"hausdorff_mm = {hd}\n")
-        f.write("selected_atlases = " + ", ".join(str(r["atlas_idx"]) for r in top_results) + "\n")
+        f.write(f"selected_atlases = {top_indices}\n")
+        f.write(f"selected_ncc = {[round(x, 6) for x in top_metrics]}\n")
+
+    plt.figure()
+
+    plt.subplot(2, 3, 1)
+    plt.imshow(fixed_img[:, :, VISUALISATION_SLICE], cmap="gray")
+    plt.title("Test image")
+
+    for i, img in enumerate(top_reg):
+        plt.subplot(2, 3, i + 2)
+        plt.imshow(img[:, :, VISUALISATION_SLICE], cmap="gray")
+        plt.title(f"NCC: {top_metrics[i]:.3f}")
+
+    plt.tight_layout()
+    plt.savefig(str(OUT_ROOT / "top_registered_images.png"), dpi=150, bbox_inches="tight")
 
     fixed_np = sitk.GetArrayFromImage(fixed_img)
     fused_np = sitk.GetArrayFromImage(binarize(fused))
     gt_np = sitk.GetArrayFromImage(binarize(gt_mask))
-    slice_idx = fixed_np.shape[0] // 2
+    slice_idx = min(VISUALISATION_SLICE, fixed_np.shape[2] - 1)
 
     plt.figure(figsize=(12, 4))
 
     plt.subplot(1, 3, 1)
-    plt.imshow(fixed_np[slice_idx], cmap="gray")
+    plt.imshow(fixed_np[:, :, slice_idx], cmap="gray")
     plt.title(f"Fixed test {global_test_idx:03d}")
     plt.axis("off")
 
     plt.subplot(1, 3, 2)
-    plt.imshow(fixed_np[slice_idx], cmap="gray")
-    plt.imshow(np.ma.masked_where(fused_np[slice_idx] == 0, fused_np[slice_idx]), cmap="Reds", alpha=0.4)
-    plt.title(f"Fused top-{TOP_K}, Dice={dice:.3f}")
+    plt.imshow(fixed_np[:, :, slice_idx], cmap="gray")
+    plt.imshow(np.ma.masked_where(fused_np[:, :, slice_idx] == 0, fused_np[:, :, slice_idx]), cmap="Reds", alpha=0.4)
+    plt.title(f"Fused top-{PRESELECTION_SIZE}, Dice={dice:.3f}")
     plt.axis("off")
 
     plt.subplot(1, 3, 3)
-    plt.imshow(fixed_np[slice_idx], cmap="gray")
-    plt.imshow(np.ma.masked_where(gt_np[slice_idx] == 0, gt_np[slice_idx]), cmap="Reds", alpha=0.4)
+    plt.imshow(fixed_np[:, :, slice_idx], cmap="gray")
+    plt.imshow(np.ma.masked_where(gt_np[:, :, slice_idx] == 0, gt_np[:, :, slice_idx]), cmap="Reds", alpha=0.4)
     plt.title("GT mask")
     plt.axis("off")
 
     plt.tight_layout()
     plt.savefig(str(OUT_ROOT / "preview.png"), dpi=150, bbox_inches="tight")
-    plt.close()
 
-    print("Finished.")
+    t4 = time.perf_counter()
+
+    print("___________________________________________")
+    print(f"Loading the images      : {(t1 - t0)//60:.0f}m {(t1 - t0)%60:.2f}s")
+    print(f"Affine + Bspline regs   : {(t2 - t1)//60:.0f}m {(t2 - t1)%60:.2f}s")
+    print(f"Preselection            : {(t3 - t2)//60:.0f}m {(t3 - t2)%60:.2f}s")
+    print(f"Plotting + saving       : {(t4 - t3)//60:.0f}m {(t4 - t3)%60:.2f}s")
+    print("___________________________________________")
+    print(f"Total time              : {(t4 - t0)//60:.0f}m {(t4 - t0)%60:.2f}s")
+    print()
     print(f"Dice = {dice:.4f}")
     print(f"Jaccard = {jacc:.4f}")
     print(f"Hausdorff = {hd}")
+    print(f"Selected atlases = {top_indices}")
 
 
 if __name__ == "__main__":
