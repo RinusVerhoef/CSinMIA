@@ -4,28 +4,23 @@
 (Optimizer "AdaptiveStochasticGradientDescent")
 (Metric "AdvancedNormalizedCorrelation")
 
-(ImageSampler "RandomCoordinate")
+(ImageSampler "Random")
 (NumberOfSpatialSamples 4096)
-(NewSamplesEveryIteration "true")
+(NewSamplesEveryIteration "false")
 (CheckNumberOfSamples "true")
-(MaximumNumberOfSamplingAttempts 4)
+(MaximumNumberOfSamplingAttempts 8)
 
 (NumberOfResolutions 4)
 (MaximumNumberOfIterations 128)
 
-(FinalGridSpacingInPhysicalUnits 30.0)
-(GridSpacingSchedule 2.803221 2.803221 2.803221 1.988100 1.988100 1.988100 1.410000 1.410000 1.410000 1.000000 1.000000 1.000000)
+(FinalGridSpacingInPhysicalUnits 40.0)
 
-(Interpolator "BSplineInterpolator")
+(Interpolator "LinearInterpolator")
 (ResampleInterpolator "FinalBSplineInterpolator")
 (FinalBSplineInterpolationOrder 3)
 
 (WriteResultImage "false")
 (DefaultPixelValue 0)
 (ResultImageFormat "nii")
-
-(WriteIterationInfo "false")
-(IterationInfoFileName "IterationInfo")
-(IterationInfoWriteInterval 1)
 
 (HowToCombineTransforms "Compose")
