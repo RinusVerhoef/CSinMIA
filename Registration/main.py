@@ -35,7 +35,7 @@ elx = sitk.ElastixImageFilter()
 elx.SetFixedImage(fixed_img)
 
 # Load parameter maps from file
-pm_affine = sitk.ReadParameterFile("ParameterFiles/Rigid1/affine.txt")
+pm_affine = sitk.ReadParameterFile("ParameterFiles/Affine/affine.txt")
 
 # Set registration parameters
 elx.SetParameterMap(pm_affine)
