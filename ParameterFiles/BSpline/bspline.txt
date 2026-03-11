@@ -1,15 +1,8 @@
 (Transform "BSplineTransform")
-(NumberOfResolutions 4)
-(FinalGridSpacingInPhysicalUnits 20.0)
-(GridSpacingSchedule 2.803221 2.803221 2.803221 1.988100 1.988100 1.988100 1.410000 1.410000 1.410000 1.000000 1.000000 1.000000)
 
-(Registration "MultiMetricMultiResolutionRegistration")
-(Metric "AdvancedMattesMutualInformation" "TransformBendingEnergyPenalty")
-(Metric0Weight 1.0)
-(Metric1Weight 1.0)
-
+(Registration "MultiResolutionRegistration")
 (Optimizer "AdaptiveStochasticGradientDescent")
-(MaximumNumberOfIterations 256)
+(Metric "AdvancedNormalizedCorrelation")
 
 (ImageSampler "RandomCoordinate")
 (NumberOfSpatialSamples 4096)
@@ -17,13 +10,22 @@
 (CheckNumberOfSamples "true")
 (MaximumNumberOfSamplingAttempts 4)
 
+(NumberOfResolutions 4)
+(MaximumNumberOfIterations 128)
+
+(FinalGridSpacingInPhysicalUnits 30.0)
+(GridSpacingSchedule 2.803221 2.803221 2.803221 1.988100 1.988100 1.988100 1.410000 1.410000 1.410000 1.000000 1.000000 1.000000)
+
 (Interpolator "BSplineInterpolator")
 (ResampleInterpolator "FinalBSplineInterpolator")
-(Resampler "DefaultResampler")
+(FinalBSplineInterpolationOrder 3)
 
+(WriteResultImage "false")
 (DefaultPixelValue 0)
 (ResultImageFormat "nii")
-(WriteResultImage "true")
+
 (WriteIterationInfo "false")
+(IterationInfoFileName "IterationInfo")
+(IterationInfoWriteInterval 1)
 
 (HowToCombineTransforms "Compose")
