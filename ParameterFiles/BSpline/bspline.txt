@@ -1,10 +1,10 @@
 (Transform "BSplineTransform")
 
-(Registration "MultiResolutionRegistration")
+(Registration "MultiMetricMultiResolutionRegistration")
 (Optimizer "AdaptiveStochasticGradientDescent")
 (Metric "AdvancedNormalizedCorrelation" "TransformBendingEnergyPenalty")
 (Metric0Weight 1.0)
-(Metric1Weight 0.01)
+(Metric1Weight 0.05)
 
 (ImageSampler "RandomCoordinate")
 (NumberOfSpatialSamples 4096)
@@ -16,7 +16,7 @@
 (NumberOfResolutions 4)
 (MaximumNumberOfIterations 512)
 
-(FinalGridSpacingInPhysicalUnits 30.0)
+(FinalGridSpacingInPhysicalUnits 16.0)
 (GridSpacingSchedule 2.803221 2.803221 2.803221 1.988100 1.988100 1.988100 1.410000 1.410000 1.410000 1.000000 1.000000 1.000000)
 
 (Interpolator "BSplineInterpolator")
