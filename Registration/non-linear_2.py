@@ -122,6 +122,17 @@ def run_bspline_from_affine(fixed_img, moving_img, affine_tmap, work_dir: Path):
     work_dir.mkdir(parents=True, exist_ok=True)
     affine_tp_file = work_dir / "affine_tp.txt"
     sitk.WriteParameterFile(last_parameter_map(affine_tmap), str(affine_tp_file))
+
+    # Fix: ensure the written affine transform does not reference a
+    # stale InitialTransformParameterFileName path that no longer exists.
+    tp_text = affine_tp_file.read_text(encoding="utf-8")
+    tp_text = re.sub(
+        r'\(InitialTransformParametersFileName\s+"[^"]*"\)',
+        '(InitialTransformParametersFileName "NoInitialTransform")',
+        tp_text,
+    )
+    affine_tp_file.write_text(tp_text, encoding="utf-8")
+
     pm_bspline = sitk.ReadParameterFile("ParameterFiles/BSpline/bspline.txt")
     pm_bspline["InitialTransformParameterFileName"] = [str(affine_tp_file).replace("\\", "/")]
     pm_bspline["HowToCombineTransforms"] = ["Compose"]
@@ -218,24 +229,36 @@ with TemporaryDirectory(prefix="bspline_top5_") as tmp:
             work_dir / "affine_only_tp.txt"
         )
         try:
+            print(f"  Running BSpline for atlas {atlas_idx:03d} ...")
             bspline_img, bs_metric, bs_tp_file = run_bspline_from_affine(
                 fixed_img=fixed_img,
                 moving_img=moving_img,
                 affine_tmap=top_tmaps[i],
                 work_dir=work_dir,
             )
+            print(f"    Affine metric: {top_metrics[i]:.6f}  |  BSpline metric: {bs_metric:.6f}")
             if bs_metric > top_metrics[i]:
+                print(f"    -> BSpline is BETTER, using BSpline")
                 final_images.append(bspline_img)
                 final_transform_files.append(bs_tp_file)
                 bs_metrics.append(bs_metric)
                 used_stage.append("BS")
             else:
+                print(f"    -> BSpline is WORSE, keeping affine")
                 final_images.append(top_reg[i])
                 final_transform_files.append(affine_tp_file)
                 bs_metrics.append(bs_metric)
                 used_stage.append("AFF")
         except Exception as e:
-            print(f"BSpline failed for atlas {atlas_idx:03d}, keeping affine: {e}")
+            print(f"  BSpline CRASHED for atlas {atlas_idx:03d}: {e}")
+            # Dump the elastix log before the temp dir is cleaned up
+            crash_log = work_dir / "elastix.log"
+            if crash_log.exists():
+                print(f"  --- elastix.log (last 15 lines) ---")
+                lines = crash_log.read_text(encoding="utf-8", errors="ignore").splitlines()
+                for ln in lines[-15:]:
+                    print(f"    {ln}")
+                print(f"  --- end log ---")
             final_images.append(top_reg[i])
             final_transform_files.append(affine_tp_file)
             bs_metrics.append(None)
