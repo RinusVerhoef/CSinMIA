@@ -3,6 +3,7 @@ from tempfile import TemporaryDirectory
 import re
 import time
 import math
+import json
 import numpy as np
 
 from prostateLoader import ProstateLoader
@@ -200,7 +201,6 @@ def run_bspline_from_affine(fixed_img, moving_img, affine_tmap, work_dir: Path):
 ATLAS_SIZE = 50
 PRESELECTION_SIZE = 10
 FUSION_SIZE = 5
-NUM_TEST_PATIENTS = 20
 VISUALISATION_SLICE = 15
 VOTE_THRESHOLD = None
 
@@ -220,10 +220,11 @@ atlas_segmen = segmen[0:ATLAS_SIZE]
 
 test_images = images[ATLAS_SIZE:]
 test_segmen = segmen[ATLAS_SIZE:]
+NUM_TEST_PATIENTS = len(test_images)
 
 t_load = time.perf_counter()
-print(f"Loaded {len(images)} volumes.  Atlas: {ATLAS_SIZE}  Test: {len(test_images)}")
-print(f"Running on {NUM_TEST_PATIENTS} test patients (indices 0..{NUM_TEST_PATIENTS-1})")
+print(f"Loaded {len(images)} volumes.  Atlas: {ATLAS_SIZE}  Test: {NUM_TEST_PATIENTS}")
+print(f"Running on ALL {NUM_TEST_PATIENTS} test patients (patients {ATLAS_SIZE}..{ATLAS_SIZE + NUM_TEST_PATIENTS - 1})")
 print(f"Results will be saved to: {OUTPUT_DIR}\n")
 
 # ============================================================
@@ -536,6 +537,11 @@ for pat_idx in range(NUM_TEST_PATIENTS):
     }
     all_results.append(patient_result)
 
+    # Save per-patient JSON so the report can be rebuilt on resume
+    json_path = OUTPUT_DIR / f"patient_{patient_number:03d}_metrics.json"
+    with open(json_path, "w", encoding="utf-8") as jf:
+        json.dump(patient_result, jf, indent=2, default=str)
+
     print(f"  Dice={dice:.3f}  Jacc={jacc:.3f}  HD={hd:.1f}mm  RVD={rvd:.3f}  "
           f"BS used={n_bs_used}/10  time={pat_time:.0f}s")
     print()
@@ -547,111 +553,105 @@ for pat_idx in range(NUM_TEST_PATIENTS):
 
 
 # ============================================================
-# Write detailed report
+# Rebuild full results from all per-patient JSONs (covers previous runs too)
 # ============================================================
 t_global_end = time.perf_counter()
 
-report_path = OUTPUT_DIR / "report.txt"
-with open(report_path, "w", encoding="utf-8") as f:
-    f.write("=" * 70 + "\n")
-    f.write("  NON-LINEAR REGISTRATION REPORT\n")
-    f.write(f"  {NUM_TEST_PATIENTS} test patients  |  "
-            f"Top {PRESELECTION_SIZE} affine -> Best {FUSION_SIZE} for fusion\n")
-    f.write("=" * 70 + "\n\n")
+all_results = []
+for pat_idx in range(NUM_TEST_PATIENTS):
+    patient_number = ATLAS_SIZE + pat_idx
+    json_path = OUTPUT_DIR / f"patient_{patient_number:03d}_metrics.json"
+    if json_path.exists():
+        with open(json_path, "r", encoding="utf-8") as jf:
+            all_results.append(json.load(jf))
 
-    # Settings
-    f.write("SETTINGS\n")
-    f.write(f"  Atlas size            : {ATLAS_SIZE}\n")
-    f.write(f"  Preselection size     : {PRESELECTION_SIZE}\n")
-    f.write(f"  Fusion size           : {FUSION_SIZE}\n")
-    f.write(f"  Vote threshold        : {VOTE_THRESHOLD}\n")
-    f.write(f"  Visualisation slice   : {VISUALISATION_SLICE}\n")
-    f.write(f"  BSpline param file    : ParameterFiles/BSpline/bspline.txt\n")
-    f.write(f"  Affine param file     : ParameterFiles/Affine/affine.txt\n")
-    f.write(f"  Total time            : {(t_global_end - t_global_start)/60:.1f} min\n\n")
+print(f"\nLoaded results for {len(all_results)}/{NUM_TEST_PATIENTS} patients.")
 
-    # Per-patient table
-    f.write("-" * 70 + "\n")
-    f.write(f"{'Patient':>8}  {'Dice':>6}  {'Jacc':>6}  {'HD(mm)':>7}  "
-            f"{'RVD':>7}  {'BS ok':>5}  {'BS fail':>7}  {'Time':>6}\n")
-    f.write("-" * 70 + "\n")
+if len(all_results) == 0:
+    print("No patient results found — nothing to report.")
+else:
+    dices  = [r["dice"] for r in all_results]
+    jaccs  = [r["jaccard"] for r in all_results]
+    hds    = [r["hausdorff"] for r in all_results]
+    rvds   = [r["rvd"] for r in all_results]
 
-    dices, jaccs, hds, rvds = [], [], [], []
-    for r in all_results:
-        f.write(f"{r['patient_number']:>8}  "
-                f"{r['dice']:>6.3f}  "
-                f"{r['jaccard']:>6.3f}  "
-                f"{r['hausdorff']:>7.1f}  "
-                f"{r['rvd']:>7.3f}  "
-                f"{r['n_bs_used']:>5}  "
-                f"{r['n_bs_fail']:>7}  "
-                f"{r['time_s']:>5.0f}s\n")
-        dices.append(r["dice"])
-        jaccs.append(r["jaccard"])
-        hds.append(r["hausdorff"])
-        rvds.append(r["rvd"])
-
-    f.write("-" * 70 + "\n")
-    f.write(f"{'MEAN':>8}  "
-            f"{np.mean(dices):>6.3f}  "
-            f"{np.mean(jaccs):>6.3f}  "
-            f"{np.mean(hds):>7.1f}  "
-            f"{np.mean(rvds):>7.3f}\n")
-    f.write(f"{'STD':>8}  "
-            f"{np.std(dices):>6.3f}  "
-            f"{np.std(jaccs):>6.3f}  "
-            f"{np.std(hds):>7.1f}  "
-            f"{np.std(rvds):>7.3f}\n")
-    f.write(f"{'MEDIAN':>8}  "
-            f"{np.median(dices):>6.3f}  "
-            f"{np.median(jaccs):>6.3f}  "
-            f"{np.median(hds):>7.1f}  "
-            f"{np.median(rvds):>7.3f}\n")
-    f.write(f"{'MIN':>8}  "
-            f"{np.min(dices):>6.3f}  "
-            f"{np.min(jaccs):>6.3f}  "
-            f"{np.min(hds):>7.1f}  "
-            f"{np.min(rvds):>7.3f}\n")
-    f.write(f"{'MAX':>8}  "
-            f"{np.max(dices):>6.3f}  "
-            f"{np.max(jaccs):>6.3f}  "
-            f"{np.max(hds):>7.1f}  "
-            f"{np.max(rvds):>7.3f}\n\n")
-
-    # Per-patient detail
-    for r in all_results:
+    report_path = OUTPUT_DIR / "report.txt"
+    with open(report_path, "w", encoding="utf-8") as f:
         f.write("=" * 70 + "\n")
-        f.write(f"Patient {r['patient_number']} (test index {r['test_index']})\n")
-        f.write(f"  Dice={r['dice']:.4f}  Jaccard={r['jaccard']:.4f}  "
-                f"HD={r['hausdorff']:.2f}mm  RVD={r['rvd']:.4f}\n")
-        f.write(f"  BSpline used: {r['n_bs_used']}/10  |  "
-                f"BSpline failed: {r['n_bs_fail']}/10  |  "
-                f"BSpline worse: {r['n_bs_worse']}/10\n")
-        f.write(f"  Selected for fusion: {r['selected_for_fusion']}\n")
-        f.write(f"  Time: {r['time_s']:.0f}s\n\n")
+        f.write("  NON-LINEAR REGISTRATION REPORT\n")
+        f.write(f"  {len(all_results)}/{NUM_TEST_PATIENTS} test patients  |  "
+                f"Top {PRESELECTION_SIZE} affine -> Best {FUSION_SIZE} for fusion\n")
+        f.write("=" * 70 + "\n\n")
 
-        f.write(f"  {'Atlas':>6}  {'AffMetric':>9}  {'BSMetric':>9}  "
-                f"{'Stage':>5}  Error\n")
-        for i in range(len(r["top_indices"])):
-            bs_str = "fail" if r["bs_metrics"][i] is None else f"{r['bs_metrics'][i]:.4f}"
-            err = r["bs_errors"][i] or ""
-            f.write(f"  {r['top_indices'][i]:>6}  "
-                    f"{r['top_affine_metrics'][i]:>9.4f}  "
-                    f"{bs_str:>9}  "
-                    f"{r['used_stage'][i]:>5}  "
-                    f"{err}\n")
-        f.write("\n")
+        f.write("SETTINGS\n")
+        f.write(f"  Atlas size            : {ATLAS_SIZE}\n")
+        f.write(f"  Preselection size     : {PRESELECTION_SIZE}\n")
+        f.write(f"  Fusion size           : {FUSION_SIZE}\n")
+        f.write(f"  Vote threshold        : {VOTE_THRESHOLD}\n")
+        f.write(f"  Visualisation slice   : {VISUALISATION_SLICE}\n")
+        f.write(f"  BSpline param file    : ParameterFiles/BSpline/bspline.txt\n")
+        f.write(f"  Affine param file     : ParameterFiles/Affine/affine.txt\n")
+        f.write(f"  Total time            : {(t_global_end - t_global_start)/60:.1f} min\n\n")
 
-print("=" * 60)
-print("ALL DONE")
-print("=" * 60)
-print(f"Total time: {(t_global_end - t_global_start)/60:.1f} min")
-print(f"\nOverall metrics across {NUM_TEST_PATIENTS} patients:")
-print(f"  Dice    : {np.mean(dices):.3f} +/- {np.std(dices):.3f}  (range {np.min(dices):.3f} - {np.max(dices):.3f})")
-print(f"  Jaccard : {np.mean(jaccs):.3f} +/- {np.std(jaccs):.3f}")
-print(f"  Hausdorf: {np.mean(hds):.1f} +/- {np.std(hds):.1f} mm")
-print(f"  RVD     : {np.mean(rvds):.3f} +/- {np.std(rvds):.3f}")
-print(f"\nResults saved to: {OUTPUT_DIR}")
-print(f"  - {NUM_TEST_PATIENTS} atlas comparison images")
-print(f"  - {NUM_TEST_PATIENTS} segmentation result images")
-print(f"  - report.txt (detailed per-patient breakdown)")
+        f.write("-" * 70 + "\n")
+        f.write(f"{'Patient':>8}  {'Dice':>6}  {'Jacc':>6}  {'HD(mm)':>7}  "
+                f"{'RVD':>7}  {'BS ok':>5}  {'BS fail':>7}  {'Time':>6}\n")
+        f.write("-" * 70 + "\n")
+
+        for r in all_results:
+            f.write(f"{r['patient_number']:>8}  "
+                    f"{r['dice']:>6.3f}  "
+                    f"{r['jaccard']:>6.3f}  "
+                    f"{r['hausdorff']:>7.1f}  "
+                    f"{r['rvd']:>7.3f}  "
+                    f"{r['n_bs_used']:>5}  "
+                    f"{r['n_bs_fail']:>7}  "
+                    f"{r['time_s']:>5.0f}s\n")
+
+        f.write("-" * 70 + "\n")
+        f.write(f"{'MEAN':>8}  {np.mean(dices):>6.3f}  {np.mean(jaccs):>6.3f}  "
+                f"{np.mean(hds):>7.1f}  {np.mean(rvds):>7.3f}\n")
+        f.write(f"{'STD':>8}  {np.std(dices):>6.3f}  {np.std(jaccs):>6.3f}  "
+                f"{np.std(hds):>7.1f}  {np.std(rvds):>7.3f}\n")
+        f.write(f"{'MEDIAN':>8}  {np.median(dices):>6.3f}  {np.median(jaccs):>6.3f}  "
+                f"{np.median(hds):>7.1f}  {np.median(rvds):>7.3f}\n")
+        f.write(f"{'MIN':>8}  {np.min(dices):>6.3f}  {np.min(jaccs):>6.3f}  "
+                f"{np.min(hds):>7.1f}  {np.min(rvds):>7.3f}\n")
+        f.write(f"{'MAX':>8}  {np.max(dices):>6.3f}  {np.max(jaccs):>6.3f}  "
+                f"{np.max(hds):>7.1f}  {np.max(rvds):>7.3f}\n\n")
+
+        for r in all_results:
+            f.write("=" * 70 + "\n")
+            f.write(f"Patient {r['patient_number']} (test index {r['test_index']})\n")
+            f.write(f"  Dice={r['dice']:.4f}  Jaccard={r['jaccard']:.4f}  "
+                    f"HD={r['hausdorff']:.2f}mm  RVD={r['rvd']:.4f}\n")
+            f.write(f"  BSpline used: {r['n_bs_used']}/10  |  "
+                    f"BSpline failed: {r['n_bs_fail']}/10  |  "
+                    f"BSpline worse: {r['n_bs_worse']}/10\n")
+            f.write(f"  Selected for fusion: {r['selected_for_fusion']}\n")
+            f.write(f"  Time: {r['time_s']:.0f}s\n\n")
+
+            f.write(f"  {'Atlas':>6}  {'AffMetric':>9}  {'BSMetric':>9}  "
+                    f"{'Stage':>5}  Error\n")
+            for i in range(len(r["top_indices"])):
+                bs_str = "fail" if r["bs_metrics"][i] is None else f"{r['bs_metrics'][i]:.4f}"
+                err = r["bs_errors"][i] or ""
+                f.write(f"  {r['top_indices'][i]:>6}  "
+                        f"{r['top_affine_metrics'][i]:>9.4f}  "
+                        f"{bs_str:>9}  "
+                        f"{r['used_stage'][i]:>5}  "
+                        f"{err}\n")
+            f.write("\n")
+
+    print("=" * 60)
+    print("ALL DONE")
+    print("=" * 60)
+    print(f"Total time: {(t_global_end - t_global_start)/60:.1f} min")
+    print(f"\nOverall metrics across {len(all_results)} patients:")
+    print(f"  Dice    : {np.mean(dices):.3f} +/- {np.std(dices):.3f}  "
+          f"(range {np.min(dices):.3f} - {np.max(dices):.3f})")
+    print(f"  Jaccard : {np.mean(jaccs):.3f} +/- {np.std(jaccs):.3f}")
+    print(f"  Hausdorf: {np.mean(hds):.1f} +/- {np.std(hds):.1f} mm")
+    print(f"  RVD     : {np.mean(rvds):.3f} +/- {np.std(rvds):.3f}")
+    print(f"\nResults saved to: {OUTPUT_DIR}")
+    print(f"  - report.txt (detailed per-patient breakdown)")
