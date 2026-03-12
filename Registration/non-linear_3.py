@@ -1,42 +1,45 @@
+"""
+Affine-only baseline: 50 affine registrations -> top 5 by metric -> fusion.
+No BSpline. Runs on 20 test patients and saves results.
+"""
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import re
 import time
 import math
+import gc
+import json
 import numpy as np
+
 from prostateLoader import ProstateLoader
 from utils import final_metric_from_elastix_log
+
 import SimpleITK as sitk
+import matplotlib
+matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
-def final_metric_from_log(log_path: Path) -> float:
-    if not log_path.exists():
-        raise FileNotFoundError(f"No elastix.log found at {log_path}")
-    pat = re.compile(r"Final metric value\s*=\s*([-+]?\d*\.?\d+(?:[eE][-+]?\d+)?)")
-    metric = None
-    with open(log_path, "r", encoding="utf-8", errors="ignore") as f:
-        for line in f:
-            m = pat.search(line)
-            if m:
-                metric = float(m.group(1))
-    if metric is None:
-        raise RuntimeError(f"Could not find 'Final metric value' in {log_path}")
-    return -metric
 
+# ============================================================
+# Output directory
+# ============================================================
+OUTPUT_DIR = Path(r"C:\Users\30697\OneDrive\2.Netherlands\capita_results\affine")
+OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+
+
+# ============================================================
+# Helper functions
+# ============================================================
 def last_parameter_map(tmap):
     try:
         return tmap[-1]
     except Exception:
         return tmap
 
-def latest_tp(out_dir: Path) -> Path:
-    tps = sorted(out_dir.glob("TransformParameters.*.txt"))
-    if not tps:
-        raise FileNotFoundError(f"No TransformParameters.*.txt found in: {out_dir}")
-    return tps[-1]
 
 def binarize(img: sitk.Image) -> sitk.Image:
     return sitk.Cast(img > 0, sitk.sitkUInt8)
+
 
 def dice_score(pred: sitk.Image, gt: sitk.Image) -> float:
     p = sitk.GetArrayFromImage(binarize(pred)).astype(np.uint8)
@@ -45,12 +48,14 @@ def dice_score(pred: sitk.Image, gt: sitk.Image) -> float:
     den = int(p.sum() + g.sum())
     return 1.0 if den == 0 else (2.0 * inter / den)
 
+
 def jaccard_score(pred: sitk.Image, gt: sitk.Image) -> float:
     p = sitk.GetArrayFromImage(binarize(pred)).astype(np.uint8)
     g = sitk.GetArrayFromImage(binarize(gt)).astype(np.uint8)
     inter = int((p & g).sum())
     union = int(((p | g) > 0).sum())
     return 1.0 if union == 0 else (inter / union)
+
 
 def relative_volume_difference(pred: sitk.Image, gt: sitk.Image) -> float:
     p = sitk.GetArrayFromImage(binarize(pred)).astype(np.uint8)
@@ -60,6 +65,7 @@ def relative_volume_difference(pred: sitk.Image, gt: sitk.Image) -> float:
     if vg == 0:
         return 0.0 if vp == 0 else np.inf
     return (vp - vg) / vg
+
 
 def hausdorff_distance_mm(pred: sitk.Image, gt: sitk.Image) -> float:
     pred_b = binarize(pred)
@@ -74,6 +80,7 @@ def hausdorff_distance_mm(pred: sitk.Image, gt: sitk.Image) -> float:
     hd.Execute(pred_b, gt_b)
     return float(hd.GetHausdorffDistance())
 
+
 def vote_fusion(masks, vote_threshold=None):
     if len(masks) == 0:
         raise ValueError("No masks provided for fusion.")
@@ -87,10 +94,12 @@ def vote_fusion(masks, vote_threshold=None):
     fused_img.CopyInformation(masks[0])
     return fused_img
 
+
 def write_transform_parameter_file_from_tmap(tmap, out_path: Path) -> Path:
     out_path.parent.mkdir(parents=True, exist_ok=True)
     sitk.WriteParameterFile(last_parameter_map(tmap), str(out_path))
     return out_path
+
 
 def warp_label_with_transformix(label_img: sitk.Image, transform_param_file: Path, out_dir: Path) -> sitk.Image:
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -118,318 +127,358 @@ def warp_label_with_transformix(label_img: sitk.Image, transform_param_file: Pat
     warped = sitk.Cast(warped > 0.5, sitk.sitkUInt8)
     return warped
 
-def run_bspline_from_affine(fixed_img, moving_img, affine_tmap, work_dir: Path):
-    work_dir.mkdir(parents=True, exist_ok=True)
-    affine_tp_file = work_dir / "affine_tp.txt"
-    sitk.WriteParameterFile(last_parameter_map(affine_tmap), str(affine_tp_file))
 
-    # Fix: ensure the written affine transform does not reference a
-    # stale InitialTransformParameterFileName path that no longer exists.
-    tp_text = affine_tp_file.read_text(encoding="utf-8")
-    tp_text = re.sub(
-        r'\(InitialTransformParametersFileName\s+"[^"]*"\)',
-        '(InitialTransformParametersFileName "NoInitialTransform")',
-        tp_text,
-    )
-    affine_tp_file.write_text(tp_text, encoding="utf-8")
-
-    pm_bspline = sitk.ReadParameterFile("ParameterFiles/BSpline/bspline.txt")
-    pm_bspline["InitialTransformParameterFileName"] = [str(affine_tp_file).replace("\\", "/")]
-    pm_bspline["HowToCombineTransforms"] = ["Compose"]
-    elx_bspline = sitk.ElastixImageFilter()
-    elx_bspline.SetFixedImage(fixed_img)
-    elx_bspline.SetMovingImage(moving_img)
-    elx_bspline.SetParameterMap(pm_bspline)
-    elx_bspline.SetOutputDirectory(str(work_dir))
-    elx_bspline.LogToConsoleOff()
-    elx_bspline.LogToFileOn()
-    elx_bspline.Execute()
-    registered_img = elx_bspline.GetResultImage()
-    bs_metric = final_metric_from_log(work_dir / "elastix.log")
-    bs_tp_file = latest_tp(work_dir)
-    return registered_img, bs_metric, bs_tp_file
-
-# ------------------------------------------------------------
-# Timer start
-# ------------------------------------------------------------
-t0 = time.perf_counter()
-# ------------------------------------------------------------
-# Variables
-# ------------------------------------------------------------
+# ============================================================
+# Settings
+# ============================================================
 ATLAS_SIZE = 50
-PRESELECTION_SIZE = 5
+PRESELECTION_SIZE = 10
+FUSION_SIZE = 5
 VISUALISATION_SLICE = 15
 VOTE_THRESHOLD = None
-METRIC_THRESHOLD = 0.7          # only fuse atlases with final metric >= this
-# ------------------------------------------------------------
-# Load data
-# ------------------------------------------------------------
+
+# ============================================================
+# Load data (once)
+# ============================================================
+t_global_start = time.perf_counter()
+
 loader = ProstateLoader()
 images, segmen = loader.LoadData()
+
 atlas_images = images[0:ATLAS_SIZE]
 atlas_segmen = segmen[0:ATLAS_SIZE]
+
 test_images = images[ATLAS_SIZE:]
 test_segmen = segmen[ATLAS_SIZE:]
-t1 = time.perf_counter()
-# ------------------------------------------------------------
-# Select fixed image and GT mask (51st patient = test_images[0])
-# ------------------------------------------------------------
-fixed_img = test_images[0]
-gt_mask = test_segmen[0]
-# ------------------------------------------------------------
-# Affine registration for all 50 atlases
-# ------------------------------------------------------------
-elx = sitk.ElastixImageFilter()
-elx.SetFixedImage(fixed_img)
-pm_affine = sitk.ReadParameterFile("ParameterFiles/Affine/affine.txt")
-elx.SetParameterMap(pm_affine)
-elx.LogToConsoleOff()
-elx.LogToFileOn()
-metrics = []
-transforms = []
-reg_results = []
-for idx, moving_img in enumerate(atlas_images):
-    elx.SetMovingImage(moving_img)
-    elx.Execute()
-    registered_img = elx.GetResultImage()
-    tmap = elx.GetTransformParameterMap()
-    metric = final_metric_from_elastix_log()
-    metrics.append(metric)
-    reg_results.append(registered_img)
-    transforms.append(tmap)
-t2 = time.perf_counter()
-# ------------------------------------------------------------
-# Preselection of top 5 based on affine metric
-# ------------------------------------------------------------
-results = list(zip(range(len(atlas_images)), metrics, transforms, atlas_images, atlas_segmen, reg_results))
-results_sorted = sorted(results, key=lambda t: t[1], reverse=True)
-top_results = results_sorted[:PRESELECTION_SIZE]
-top_indices = [r[0] for r in top_results]
-top_metrics = [r[1] for r in top_results]
-top_tmaps = [r[2] for r in top_results]
-top_images = [r[3] for r in top_results]
-top_segmen = [r[4] for r in top_results]
-top_reg = [r[5] for r in top_results]
-t3 = time.perf_counter()
-# ------------------------------------------------------------
-# Run BSpline only on top 5
-# Keep affine if BSpline is worse or fails
-# Also keep the chosen transform file for mask warping
-# ------------------------------------------------------------
-final_images = []
-final_transform_files = []
-final_metrics = []              # the metric of whichever stage was chosen
-bs_metrics = []
-used_stage = []
-with TemporaryDirectory(prefix="bspline_top5_") as tmp:
-    tmp_root = Path(tmp)
-    for i, moving_img in enumerate(top_images):
-        atlas_idx = top_indices[i]
-        work_dir = tmp_root / f"atlas_{atlas_idx:03d}"
-        affine_tp_file = write_transform_parameter_file_from_tmap(
-            top_tmaps[i],
-            work_dir / "affine_only_tp.txt"
-        )
-        try:
-            print(f"  Running BSpline for atlas {atlas_idx:03d} ...")
-            bspline_img, bs_metric, bs_tp_file = run_bspline_from_affine(
-                fixed_img=fixed_img,
-                moving_img=moving_img,
-                affine_tmap=top_tmaps[i],
-                work_dir=work_dir,
+NUM_TEST_PATIENTS = len(test_images)
+
+t_load = time.perf_counter()
+print(f"Loaded {len(images)} volumes.  Atlas: {ATLAS_SIZE}  Test: {NUM_TEST_PATIENTS}")
+print(f"Running AFFINE-ONLY on ALL {NUM_TEST_PATIENTS} test patients (patients {ATLAS_SIZE}..{ATLAS_SIZE + NUM_TEST_PATIENTS - 1})")
+print(f"Results will be saved to: {OUTPUT_DIR}\n")
+
+# ============================================================
+# Loop over patients
+# ============================================================
+all_results = []
+
+plt.rcParams.update({
+    "font.size": 10,
+    "axes.titlesize": 11,
+    "figure.titlesize": 15
+})
+
+for pat_idx in range(NUM_TEST_PATIENTS):
+    patient_number = ATLAS_SIZE + pat_idx
+
+    # --- Resume: skip if already saved ---
+    fig1_check = OUTPUT_DIR / f"patient_{patient_number:03d}_atlases.png"
+    fig2_check = OUTPUT_DIR / f"patient_{patient_number:03d}_segmentation.png"
+    if fig1_check.exists() and fig2_check.exists():
+        print(f"PATIENT {pat_idx+1}/{NUM_TEST_PATIENTS} (patient {patient_number}) — SKIPPING (already saved)")
+        continue
+
+    print("=" * 60)
+    print(f"PATIENT {pat_idx+1}/{NUM_TEST_PATIENTS}  —  test index {pat_idx}  (patient {patient_number})")
+    print("=" * 60)
+
+    t0 = time.perf_counter()
+
+    fixed_img = test_images[pat_idx]
+    gt_mask = test_segmen[pat_idx]
+
+    # ----------------------------------------------------------
+    # Affine registration for all 50 atlases
+    # ----------------------------------------------------------
+    elx = sitk.ElastixImageFilter()
+    elx.SetFixedImage(fixed_img)
+
+    pm_affine = sitk.ReadParameterFile("ParameterFiles/Affine/affine.txt")
+    elx.SetParameterMap(pm_affine)
+    elx.LogToConsoleOff()
+    elx.LogToFileOn()
+
+    metrics = []
+    transforms = []
+    reg_results = []
+
+    for idx, moving_img in enumerate(atlas_images):
+        elx.SetMovingImage(moving_img)
+        elx.Execute()
+
+        registered_img = elx.GetResultImage()
+        tmap = elx.GetTransformParameterMap()
+
+        metric = final_metric_from_elastix_log()
+        metrics.append(metric)
+        reg_results.append(registered_img)
+        transforms.append(tmap)
+
+    t1 = time.perf_counter()
+
+    # ----------------------------------------------------------
+    # Preselection of top K based on affine metric
+    # ----------------------------------------------------------
+    results = list(zip(range(len(atlas_images)), metrics, transforms,
+                       atlas_images, atlas_segmen, reg_results))
+    results_sorted = sorted(results, key=lambda t: t[1], reverse=True)
+    top_results = results_sorted[:PRESELECTION_SIZE]
+
+    top_indices = [r[0] for r in top_results]
+    top_metrics = [r[1] for r in top_results]
+    top_tmaps   = [r[2] for r in top_results]
+    top_segmen_sel = [r[4] for r in top_results]
+    top_reg     = [r[5] for r in top_results]
+
+    # Select best FUSION_SIZE by affine metric (already sorted)
+    selected_indices = list(range(FUSION_SIZE))
+
+    print(f"  Top {FUSION_SIZE} selected for fusion (by affine metric):")
+    for i in selected_indices:
+        print(f"    Atlas {top_indices[i]:03d} | affine metric = {top_metrics[i]:.4f}")
+
+    t2 = time.perf_counter()
+
+    # ----------------------------------------------------------
+    # Warp selected atlas masks with affine transform
+    # ----------------------------------------------------------
+    with TemporaryDirectory(prefix="affine_warp_") as tmp:
+        tmp_root = Path(tmp)
+        warped_masks = []
+
+        for i in selected_indices:
+            atlas_idx = top_indices[i]
+            work_dir = tmp_root / f"atlas_{atlas_idx:03d}"
+
+            tp_file = write_transform_parameter_file_from_tmap(
+                top_tmaps[i],
+                work_dir / "affine_tp.txt"
             )
-            print(f"    Affine metric: {top_metrics[i]:.6f}  |  BSpline metric: {bs_metric:.6f}")
-            if bs_metric > top_metrics[i]:
-                print(f"    -> BSpline is BETTER, using BSpline")
-                final_images.append(bspline_img)
-                final_transform_files.append(bs_tp_file)
-                final_metrics.append(bs_metric)
-                bs_metrics.append(bs_metric)
-                used_stage.append("BS")
-            else:
-                print(f"    -> BSpline is WORSE, keeping affine")
-                final_images.append(top_reg[i])
-                final_transform_files.append(affine_tp_file)
-                final_metrics.append(top_metrics[i])
-                bs_metrics.append(bs_metric)
-                used_stage.append("AFF")
-        except Exception as e:
-            print(f"  BSpline CRASHED for atlas {atlas_idx:03d}: {e}")
-            crash_log = work_dir / "elastix.log"
-            if crash_log.exists():
-                print(f"  --- elastix.log (last 15 lines) ---")
-                lines = crash_log.read_text(encoding="utf-8", errors="ignore").splitlines()
-                for ln in lines[-15:]:
-                    print(f"    {ln}")
-                print(f"  --- end log ---")
-            final_images.append(top_reg[i])
-            final_transform_files.append(affine_tp_file)
-            final_metrics.append(top_metrics[i])
-            bs_metrics.append(None)
-            used_stage.append("AFF")
-    t4 = time.perf_counter()
-    # --------------------------------------------------------
-    # Filter: only keep atlases whose final metric >= threshold
-    # --------------------------------------------------------
-    keep = [j for j in range(len(final_metrics)) if final_metrics[j] >= METRIC_THRESHOLD]
-    if len(keep) == 0:
-        print(f"\n  WARNING: no atlas reached the threshold ({METRIC_THRESHOLD}).")
-        print(f"  Falling back to the single best atlas.")
-        best = int(np.argmax(final_metrics))
-        keep = [best]
 
-    print(f"\n  Metric threshold: {METRIC_THRESHOLD}")
-    print(f"  Atlases kept for fusion: {len(keep)} / {len(final_metrics)}")
-    for j in keep:
-        print(f"    Atlas {top_indices[j]:03d}  metric={final_metrics[j]:.6f}  stage={used_stage[j]}")
+            # Fix InitialTransformParametersFileName
+            tp_text = tp_file.read_text(encoding="utf-8")
+            tp_text = re.sub(
+                r'\(InitialTransformParametersFileName\s+"[^"]*"\)',
+                '(InitialTransformParametersFileName "NoInitialTransform")',
+                tp_text,
+            )
+            tp_file.write_text(tp_text, encoding="utf-8")
 
-    # --------------------------------------------------------
-    # Warp only the kept atlas masks
-    # --------------------------------------------------------
-    warped_masks = []
-    for j in keep:
-        atlas_idx = top_indices[j]
-        warp_dir = tmp_root / f"atlas_{atlas_idx:03d}" / "mask_warp"
-        warped_mask = warp_label_with_transformix(
-            label_img=top_segmen[j],
-            transform_param_file=final_transform_files[j],
-            out_dir=warp_dir,
+            warped_mask = warp_label_with_transformix(
+                label_img=top_segmen_sel[i],
+                transform_param_file=tp_file,
+                out_dir=work_dir / "mask_warp",
+            )
+            warped_masks.append(warped_mask)
+
+        # ------------------------------------------------------
+        # Fuse and evaluate
+        # ------------------------------------------------------
+        fused_mask = vote_fusion(warped_masks, vote_threshold=VOTE_THRESHOLD)
+
+        dice = dice_score(fused_mask, gt_mask)
+        jacc = jaccard_score(fused_mask, gt_mask)
+        hd   = hausdorff_distance_mm(fused_mask, gt_mask)
+        rvd  = relative_volume_difference(fused_mask, gt_mask)
+
+        t3 = time.perf_counter()
+
+        # ------------------------------------------------------
+        # Save figure 1: top 10 atlases (showing all, marking selected)
+        # ------------------------------------------------------
+        n_panels = 1 + PRESELECTION_SIZE
+        n_cols = 4
+        n_rows = math.ceil(n_panels / n_cols)
+
+        fig1, axes = plt.subplots(n_rows, n_cols, figsize=(4.5 * n_cols, 3.8 * n_rows), dpi=120)
+        axes = np.array(axes).reshape(-1)
+
+        fig1.suptitle(
+            f"Patient {patient_number} — Top {PRESELECTION_SIZE} atlases, "
+            f"best {FUSION_SIZE} selected (AFFINE ONLY)",
+            fontsize=14, y=0.98
         )
-        warped_masks.append(warped_mask)
-    # --------------------------------------------------------
-    # Fuse warped masks and compare to GT mask
-    # --------------------------------------------------------
-    fused_mask = vote_fusion(warped_masks, vote_threshold=VOTE_THRESHOLD)
-    dice = dice_score(fused_mask, gt_mask)
-    jacc = jaccard_score(fused_mask, gt_mask)
-    hd = hausdorff_distance_mm(fused_mask, gt_mask)
-    rvd = relative_volume_difference(fused_mask, gt_mask)
-    t5 = time.perf_counter()
-    # --------------------------------------------------------
-    # Plot styling
-    # --------------------------------------------------------
-    plt.rcParams.update({
-        "font.size": 10,
-        "axes.titlesize": 12,
-        "figure.titlesize": 15
-    })
-    # --------------------------------------------------------
-    # Plot registration results (only kept atlases)
-    # --------------------------------------------------------
-    n_kept = len(keep)
-    n_plots = n_kept + 1  # +1 for the test image
-    ncols = min(n_plots, 3)
-    nrows = math.ceil(n_plots / ncols)
-    fig1, axes = plt.subplots(nrows, ncols, figsize=(6 * ncols, 5 * nrows), dpi=120)
-    if nrows == 1 and ncols == 1:
-        axes = np.array([[axes]])
-    elif nrows == 1:
-        axes = axes[np.newaxis, :]
-    elif ncols == 1:
-        axes = axes[:, np.newaxis]
-    fig1.suptitle(
-        f"Atlases kept for fusion (metric >= {METRIC_THRESHOLD}): {n_kept}",
-        fontsize=15,
-        y=0.96
-    )
-    ax = axes[0, 0]
-    ax.imshow(fixed_img[:, :, VISUALISATION_SLICE], cmap="gray")
-    ax.set_title("Test image", fontsize=13, pad=8)
-    ax.set_xticks([]); ax.set_yticks([])
-    for plot_i, j in enumerate(keep):
-        pos = plot_i + 1
-        row = pos // ncols
-        col = pos % ncols
-        ax = axes[row, col]
-        ax.imshow(final_images[j][:, :, VISUALISATION_SLICE], cmap="gray")
-        ax.set_xticks([]); ax.set_yticks([])
-        if bs_metrics[j] is None:
-            bs_str = "fail"
-        else:
-            bs_str = f"{bs_metrics[j]:.3f}"
-        title_txt = (
-            f"Atlas {top_indices[j]:03d}\n"
-            f"Affine: {top_metrics[j]:.3f} | BS: {bs_str}\n"
-            f"Used: {used_stage[j]} | Final: {final_metrics[j]:.3f}"
+
+        axes[0].imshow(fixed_img[:, :, VISUALISATION_SLICE], cmap="gray")
+        axes[0].set_title("Test image", fontsize=12, pad=8)
+        axes[0].set_xticks([]); axes[0].set_yticks([])
+
+        for i in range(PRESELECTION_SIZE):
+            ax = axes[i + 1]
+            ax.imshow(top_reg[i][:, :, VISUALISATION_SLICE], cmap="gray")
+            ax.set_xticks([]); ax.set_yticks([])
+
+            is_selected = i in selected_indices
+            status = "SELECTED" if is_selected else "not used"
+            title_txt = (
+                f"Atlas {top_indices[i]:03d}\n"
+                f"Affine: {top_metrics[i]:.3f}\n"
+                f"{status}"
+            )
+            color = "green" if is_selected else "gray"
+            ax.set_title(title_txt, fontsize=10, pad=8, color=color)
+
+        for k in range(n_panels, len(axes)):
+            axes[k].axis("off")
+
+        fig1.subplots_adjust(left=0.03, right=0.99, bottom=0.05, top=0.90,
+                             wspace=0.08, hspace=0.35)
+
+        fig1_path = OUTPUT_DIR / f"patient_{patient_number:03d}_atlases.png"
+        fig1.savefig(fig1_path, bbox_inches="tight")
+        plt.close(fig1)
+
+        # ------------------------------------------------------
+        # Save figure 2: segmentation result
+        # ------------------------------------------------------
+        fixed_np = sitk.GetArrayFromImage(fixed_img)
+        fused_np = sitk.GetArrayFromImage(binarize(fused_mask))
+        gt_np    = sitk.GetArrayFromImage(binarize(gt_mask))
+
+        fig2, axes2 = plt.subplots(1, 3, figsize=(16, 5.8), dpi=120)
+        fig2.suptitle(
+            f"Patient {patient_number} — Segmentation (AFFINE ONLY)\n"
+            f"Dice: {dice:.3f} | Jaccard: {jacc:.3f} | "
+            f"Hausdorff: {hd:.3f} mm | RVD: {rvd:.3f}",
+            fontsize=14, y=0.97
         )
-        ax.set_title(title_txt, fontsize=11, pad=8)
-    # hide unused subplots
-    for pos in range(n_plots, nrows * ncols):
-        axes[pos // ncols, pos % ncols].axis("off")
-    fig1.tight_layout(rect=[0, 0, 1, 0.92])
-    # --------------------------------------------------------
-    # Plot segmentation result
-    # --------------------------------------------------------
-    fixed_np = sitk.GetArrayFromImage(fixed_img)
-    fused_np = sitk.GetArrayFromImage(binarize(fused_mask))
-    gt_np = sitk.GetArrayFromImage(binarize(gt_mask))
-    fig2, axes2 = plt.subplots(1, 3, figsize=(16, 5.8), dpi=120)
-    fig2.suptitle(
-        f"Segmentation result  (threshold={METRIC_THRESHOLD}, kept={n_kept})\n"
-        f"Dice: {dice:.3f} | Jaccard: {jacc:.3f} | "
-        f"Hausdorff: {hd:.3f} mm | RVD: {rvd:.3f}",
-        fontsize=14,
-        y=0.97
-    )
-    axes2[0].imshow(fixed_np[VISUALISATION_SLICE], cmap="gray")
-    axes2[0].set_title("Test image", fontsize=13, pad=8)
-    axes2[0].set_xticks([]); axes2[0].set_yticks([])
-    axes2[1].imshow(fixed_np[VISUALISATION_SLICE], cmap="gray")
-    axes2[1].imshow(
-        np.ma.masked_where(fused_np[VISUALISATION_SLICE] == 0, fused_np[VISUALISATION_SLICE]),
-        cmap="Reds",
-        alpha=0.4,
-    )
-    axes2[1].set_title("Fused prediction", fontsize=13, pad=8)
-    axes2[1].set_xticks([]); axes2[1].set_yticks([])
-    axes2[2].imshow(fixed_np[VISUALISATION_SLICE], cmap="gray")
-    axes2[2].imshow(
-        np.ma.masked_where(gt_np[VISUALISATION_SLICE] == 0, gt_np[VISUALISATION_SLICE]),
-        cmap="Reds",
-        alpha=0.4,
-    )
-    axes2[2].set_title("Ground truth mask", fontsize=13, pad=8)
-    axes2[2].set_xticks([]); axes2[2].set_yticks([])
-    fig2.subplots_adjust(
-        left=0.03,
-        right=0.99,
-        bottom=0.06,
-        top=0.80,
-        wspace=0.03
-    )
-t6 = time.perf_counter()
-# ------------------------------------------------------------
-# Print timings and summary
-# ------------------------------------------------------------
-print("___________________________________________")
-print(f"Loading the images      : {(t1 - t0)//60:.0f}m {(t1 - t0)%60:.2f}s")
-print(f"Affine registrations    : {(t2 - t1)//60:.0f}m {(t2 - t1)%60:.2f}s")
-print(f"Preselection            : {(t3 - t2)//60:.0f}m {(t3 - t2)%60:.2f}s")
-print(f"BSpline refinements     : {(t4 - t3)//60:.0f}m {(t4 - t3)%60:.2f}s")
-print(f"Mask warping + fusion   : {(t5 - t4)//60:.0f}m {(t5 - t4)%60:.2f}s")
-print(f"Plotting                : {(t6 - t5)//60:.0f}m {(t6 - t5)%60:.2f}s")
-print("___________________________________________")
-print(f"Total time              : {(t6 - t0)//60:.0f}m {(t6 - t0)%60:.2f}s")
-print(f"\nMetric threshold        : {METRIC_THRESHOLD}")
-print(f"Atlases kept for fusion : {len(keep)} / {PRESELECTION_SIZE}")
-print("\nAll 5 atlases:")
-for i in range(len(top_indices)):
-    if bs_metrics[i] is None:
-        bs_str = "fail"
-    else:
-        bs_str = f"{bs_metrics[i]:.6f}"
-    kept_str = "KEPT" if i in keep else "DROPPED"
-    print(
-        f"  Atlas {top_indices[i]:03d} | "
-        f"Affine = {top_metrics[i]:.6f} | "
-        f"BS = {bs_str} | "
-        f"Final = {final_metrics[i]:.6f} | "
-        f"Stage = {used_stage[i]} | "
-        f"{kept_str}"
-    )
-print("\nSegmentation metrics:")
-print(f"  Dice                  : {dice:.6f}")
-print(f"  Jaccard               : {jacc:.6f}")
-print(f"  Hausdorff distance mm : {hd:.6f}")
-print(f"  Relative volume diff  : {rvd:.6f}")
-plt.show()
+
+        axes2[0].imshow(fixed_np[VISUALISATION_SLICE], cmap="gray")
+        axes2[0].set_title("Test image", fontsize=13, pad=8)
+        axes2[0].set_xticks([]); axes2[0].set_yticks([])
+
+        axes2[1].imshow(fixed_np[VISUALISATION_SLICE], cmap="gray")
+        axes2[1].imshow(
+            np.ma.masked_where(fused_np[VISUALISATION_SLICE] == 0,
+                               fused_np[VISUALISATION_SLICE]),
+            cmap="Reds", alpha=0.4,
+        )
+        axes2[1].set_title("Fused prediction", fontsize=13, pad=8)
+        axes2[1].set_xticks([]); axes2[1].set_yticks([])
+
+        axes2[2].imshow(fixed_np[VISUALISATION_SLICE], cmap="gray")
+        axes2[2].imshow(
+            np.ma.masked_where(gt_np[VISUALISATION_SLICE] == 0,
+                               gt_np[VISUALISATION_SLICE]),
+            cmap="Reds", alpha=0.4,
+        )
+        axes2[2].set_title("Ground truth mask", fontsize=13, pad=8)
+        axes2[2].set_xticks([]); axes2[2].set_yticks([])
+
+        fig2.subplots_adjust(left=0.03, right=0.99, bottom=0.06, top=0.80,
+                             wspace=0.03)
+
+        fig2_path = OUTPUT_DIR / f"patient_{patient_number:03d}_segmentation.png"
+        fig2.savefig(fig2_path, bbox_inches="tight")
+        plt.close(fig2)
+
+    # ----------------------------------------------------------
+    # Store result
+    # ----------------------------------------------------------
+    pat_time = t3 - t0
+
+    patient_result = {
+        "patient_number": patient_number,
+        "test_index": pat_idx,
+        "dice": dice,
+        "jaccard": jacc,
+        "hausdorff": hd,
+        "rvd": rvd,
+        "time_s": pat_time,
+        "top_indices": list(top_indices),
+        "top_affine_metrics": list(top_metrics),
+        "selected_for_fusion": [top_indices[i] for i in selected_indices],
+    }
+    all_results.append(patient_result)
+
+    # Save per-patient JSON so the report can be rebuilt on resume
+    json_path = OUTPUT_DIR / f"patient_{patient_number:03d}_metrics.json"
+    with open(json_path, "w", encoding="utf-8") as jf:
+        json.dump(patient_result, jf, indent=2, default=str)
+
+    print(f"  Dice={dice:.3f}  Jacc={jacc:.3f}  HD={hd:.1f}mm  RVD={rvd:.3f}  "
+          f"time={pat_time:.0f}s")
+    print()
+
+    # Free memory
+    del metrics, transforms, reg_results, warped_masks, fused_mask, fixed_img, gt_mask
+    gc.collect()
+
+
+# ============================================================
+# Rebuild full results from all per-patient JSONs (covers previous runs too)
+# ============================================================
+t_global_end = time.perf_counter()
+
+all_results = []
+for pat_idx in range(NUM_TEST_PATIENTS):
+    patient_number = ATLAS_SIZE + pat_idx
+    json_path = OUTPUT_DIR / f"patient_{patient_number:03d}_metrics.json"
+    if json_path.exists():
+        with open(json_path, "r", encoding="utf-8") as jf:
+            all_results.append(json.load(jf))
+
+print(f"\nLoaded results for {len(all_results)}/{NUM_TEST_PATIENTS} patients.")
+
+if len(all_results) == 0:
+    print("No patient results found — nothing to report.")
+else:
+    dices  = [r["dice"] for r in all_results]
+    jaccs  = [r["jaccard"] for r in all_results]
+    hds    = [r["hausdorff"] for r in all_results]
+    rvds   = [r["rvd"] for r in all_results]
+
+    report_path = OUTPUT_DIR / "report.txt"
+    with open(report_path, "w", encoding="utf-8") as f:
+        f.write("=" * 70 + "\n")
+        f.write("  AFFINE-ONLY REGISTRATION REPORT\n")
+        f.write(f"  {len(all_results)}/{NUM_TEST_PATIENTS} test patients  |  "
+                f"Top {PRESELECTION_SIZE} affine -> Best {FUSION_SIZE} for fusion\n")
+        f.write("  NO BSpline — affine registration only\n")
+        f.write("=" * 70 + "\n\n")
+
+        f.write("SETTINGS\n")
+        f.write(f"  Atlas size            : {ATLAS_SIZE}\n")
+        f.write(f"  Preselection size     : {PRESELECTION_SIZE}\n")
+        f.write(f"  Fusion size           : {FUSION_SIZE}\n")
+        f.write(f"  Vote threshold        : {VOTE_THRESHOLD}\n")
+        f.write(f"  Affine param file     : ParameterFiles/Affine/affine.txt\n")
+        f.write(f"  Total time            : {(t_global_end - t_global_start)/60:.1f} min\n\n")
+
+        f.write("-" * 70 + "\n")
+        f.write(f"{'Patient':>8}  {'Dice':>6}  {'Jacc':>6}  {'HD(mm)':>7}  "
+                f"{'RVD':>7}  {'Time':>6}\n")
+        f.write("-" * 70 + "\n")
+
+        for r in all_results:
+            f.write(f"{r['patient_number']:>8}  "
+                    f"{r['dice']:>6.3f}  "
+                    f"{r['jaccard']:>6.3f}  "
+                    f"{r['hausdorff']:>7.1f}  "
+                    f"{r['rvd']:>7.3f}  "
+                    f"{r['time_s']:>5.0f}s\n")
+
+        f.write("-" * 70 + "\n")
+        f.write(f"{'MEAN':>8}  {np.mean(dices):>6.3f}  {np.mean(jaccs):>6.3f}  "
+                f"{np.mean(hds):>7.1f}  {np.mean(rvds):>7.3f}\n")
+        f.write(f"{'STD':>8}  {np.std(dices):>6.3f}  {np.std(jaccs):>6.3f}  "
+                f"{np.std(hds):>7.1f}  {np.std(rvds):>7.3f}\n")
+        f.write(f"{'MEDIAN':>8}  {np.median(dices):>6.3f}  {np.median(jaccs):>6.3f}  "
+                f"{np.median(hds):>7.1f}  {np.median(rvds):>7.3f}\n\n")
+
+        for r in all_results:
+            f.write(f"Patient {r['patient_number']}: "
+                    f"Dice={r['dice']:.4f}  Jacc={r['jaccard']:.4f}  "
+                    f"HD={r['hausdorff']:.2f}mm  RVD={r['rvd']:.4f}  "
+                    f"Fused={r['selected_for_fusion']}\n")
+
+    print("=" * 60)
+    print("ALL DONE")
+    print("=" * 60)
+    print(f"Total time: {(t_global_end - t_global_start)/60:.1f} min")
+    print(f"\nOverall metrics across {len(all_results)} patients (AFFINE ONLY):")
+    print(f"  Dice    : {np.mean(dices):.3f} +/- {np.std(dices):.3f}")
+    print(f"  Jaccard : {np.mean(jaccs):.3f} +/- {np.std(jaccs):.3f}")
+    print(f"  Hausdorf: {np.mean(hds):.1f} +/- {np.std(hds):.1f} mm")
+    print(f"  RVD     : {np.mean(rvds):.3f} +/- {np.std(rvds):.3f}")
+    print(f"\nResults saved to: {OUTPUT_DIR}")
