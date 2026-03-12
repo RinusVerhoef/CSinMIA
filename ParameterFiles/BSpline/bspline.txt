@@ -2,16 +2,19 @@
 
 (Registration "MultiResolutionRegistration")
 (Optimizer "AdaptiveStochasticGradientDescent")
-(Metric "AdvancedNormalizedCorrelation")
+(Metric "AdvancedNormalizedCorrelation" "TransformBendingEnergyPenalty")
+(Metric0Weight 1.0)
+(Metric1Weight 0.01)
 
 (ImageSampler "RandomCoordinate")
 (NumberOfSpatialSamples 4096)
 (NewSamplesEveryIteration "true")
 (CheckNumberOfSamples "true")
-(MaximumNumberOfSamplingAttempts 4)
+(MaximumNumberOfSamplingAttempts 8)
+(RequiredRatioOfValidSamples 0.05)
 
 (NumberOfResolutions 4)
-(MaximumNumberOfIterations 128)
+(MaximumNumberOfIterations 512)
 
 (FinalGridSpacingInPhysicalUnits 30.0)
 (GridSpacingSchedule 2.803221 2.803221 2.803221 1.988100 1.988100 1.988100 1.410000 1.410000 1.410000 1.000000 1.000000 1.000000)
