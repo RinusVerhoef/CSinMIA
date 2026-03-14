@@ -40,7 +40,7 @@ def safe_final_metric(max_retries=5, wait_sec=3):
 # ============================================================
 # Output directories
 # ============================================================
-OUTPUT_DIR_BSPLINE = Path(r"C:\Users\30697\OneDrive\2.Netherlands\capita_results\top5")
+OUTPUT_DIR_BSPLINE = Path(r"C:\Users\30697\OneDrive\2.Netherlands\capita_results\first_5")
 OUTPUT_DIR_AFFINE  = OUTPUT_DIR_BSPLINE / "affine"
 OUTPUT_DIR_BSPLINE.mkdir(parents=True, exist_ok=True)
 OUTPUT_DIR_AFFINE.mkdir(parents=True, exist_ok=True)
@@ -289,7 +289,7 @@ def write_report(out_dir, all_results, num_total, title, has_bspline=False):
 # ============================================================
 # Settings
 # ============================================================
-ATLAS_SIZE = 50
+ATLAS_SIZE = 5
 PRESELECTION_SIZE = 5
 FUSION_SIZE = 5
 VISUALISATION_SLICE = 15
