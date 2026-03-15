@@ -13,11 +13,11 @@
 (MaximumNumberOfSamplingAttempts 8)
 (RequiredRatioOfValidSamples 0.05)
 
-(NumberOfResolutions 4)
+(NumberOfResolutions 3)
 (MaximumNumberOfIterations 512)
 
-(FinalGridSpacingInPhysicalUnits 16.0)
-(GridSpacingSchedule 2.803221 2.803221 2.803221 1.988100 1.988100 1.988100 1.410000 1.410000 1.410000 1.000000 1.000000 1.000000)
+(FinalGridSpacingInPhysicalUnits 24.0)
+(GridSpacingSchedule 2.803221 2.803221 2.803221 1.410000 1.410000 1.410000 1.000000 1.000000 1.000000)
 
 (Interpolator "BSplineInterpolator")
 (ResampleInterpolator "FinalBSplineInterpolator")
