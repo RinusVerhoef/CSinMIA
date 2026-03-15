@@ -1,9 +1,8 @@
 """
-Full pipeline: 64 affine -> top 10 -> BSpline -> best 5 -> fusion -> post-processing
-Post-processing: largest connected component + fill holes
-Atlases: first 64 patients (0-63). Test: patients 65-138.
-Saves to capita_results/top64/
-Resume capable (skips patients with existing PNGs).
+Full pipeline: 50 affine -> top 10 -> BSpline -> best 5 -> fusion (NO post-processing)
+Atlases: first 50 patients (0-49). Test: patients 50-138.
+Saves to capita_results/base/
+Resume capable (skips patients with existing PNGs — will skip 65-103).
 """
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -40,7 +39,7 @@ def safe_final_metric(max_retries=5, wait_sec=3):
 # ============================================================
 # Output directory
 # ============================================================
-OUTPUT_DIR = Path(r"C:\Users\30697\OneDrive\2.Netherlands\capita_results\top64")
+OUTPUT_DIR = Path(r"C:\Users\30697\OneDrive\2.Netherlands\capita_results\base")
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
 
@@ -245,7 +244,7 @@ def write_report(out_dir, all_results, num_total, title):
         f.write("=" * 70 + "\n")
         f.write(f"  {title}\n")
         f.write(f"  {len(all_results)}/{num_total} test patients\n")
-        f.write(f"  Post-processing: largest component + fill holes\n")
+        f.write(f"  No post-processing\n")
         f.write("=" * 70 + "\n\n")
 
         f.write("-" * 70 + "\n")
@@ -306,8 +305,8 @@ def write_report(out_dir, all_results, num_total, title):
 # ============================================================
 # Settings
 # ============================================================
-ATLAS_SIZE = 64
-TEST_START = 65          # test patients start at patient 65
+ATLAS_SIZE = 50
+TEST_START = 50          # test patients start at patient 50
 PRESELECTION_SIZE = 10
 FUSION_SIZE = 5
 VISUALISATION_SLICE = 15
@@ -331,8 +330,8 @@ NUM_TEST_PATIENTS = len(test_images)
 
 print(f"Loaded {len(images)} volumes.  Atlas: {ATLAS_SIZE} (patients 0-{ATLAS_SIZE-1})  Test: {NUM_TEST_PATIENTS}")
 print(f"Test patients {TEST_START}..{TEST_START + NUM_TEST_PATIENTS - 1}")
-print(f"Pipeline: {ATLAS_SIZE} affine -> top {PRESELECTION_SIZE} -> BSpline -> best {FUSION_SIZE} -> fusion -> post-processing")
-print(f"Post-processing: largest connected component + fill holes")
+print(f"Pipeline: {ATLAS_SIZE} affine -> top {PRESELECTION_SIZE} -> BSpline -> best {FUSION_SIZE} -> fusion")
+print(f"No post-processing")
 print(f"Output: {OUTPUT_DIR}\n")
 
 plt.rcParams.update({
@@ -503,12 +502,6 @@ for pat_idx in range(NUM_TEST_PATIENTS):
 
         fused_mask = vote_fusion(warped_masks, vote_threshold=VOTE_THRESHOLD)
 
-        # ----------------------------------------------------------
-        # POST-PROCESSING: largest component + fill holes
-        # ----------------------------------------------------------
-        fused_mask = postprocess_mask(fused_mask)
-        print("  Post-processing applied (largest component + fill holes)")
-
         dice = dice_score(fused_mask, gt_mask)
         jacc = jaccard_score(fused_mask, gt_mask)
         hd   = hausdorff_distance_mm(fused_mask, gt_mask)
@@ -557,7 +550,7 @@ for pat_idx in range(NUM_TEST_PATIENTS):
         gt_np    = sitk.GetArrayFromImage(binarize(gt_mask))
         fig2, axes2 = plt.subplots(1, 3, figsize=(16, 5.8), dpi=120)
         fig2.suptitle(
-            f"Patient {patient_number} — Segmentation (post-processed)\n"
+            f"Patient {patient_number} — Segmentation result\n"
             f"Dice: {dice:.3f} | Jaccard: {jacc:.3f} | "
             f"Hausdorff: {hd:.3f} mm | RVD: {rvd:.3f}", fontsize=14, y=0.97)
         axes2[0].imshow(fixed_np[VISUALISATION_SLICE], cmap="gray")
@@ -566,7 +559,7 @@ for pat_idx in range(NUM_TEST_PATIENTS):
         axes2[1].imshow(fixed_np[VISUALISATION_SLICE], cmap="gray")
         axes2[1].imshow(np.ma.masked_where(fused_np[VISUALISATION_SLICE]==0,
                         fused_np[VISUALISATION_SLICE]), cmap="Reds", alpha=0.4)
-        axes2[1].set_title("Fused prediction (post-processed)", fontsize=13, pad=8)
+        axes2[1].set_title("Fused prediction", fontsize=13, pad=8)
         axes2[1].set_xticks([]); axes2[1].set_yticks([])
         axes2[2].imshow(fixed_np[VISUALISATION_SLICE], cmap="gray")
         axes2[2].imshow(np.ma.masked_where(gt_np[VISUALISATION_SLICE]==0,
@@ -621,7 +614,7 @@ print("#" * 60)
 all_results = load_all_jsons(OUTPUT_DIR, TEST_START, NUM_TEST_PATIENTS)
 print(f"  Loaded {len(all_results)}/{NUM_TEST_PATIENTS} results.")
 write_report(OUTPUT_DIR, all_results, NUM_TEST_PATIENTS,
-             "NON-LINEAR REGISTRATION (64 ATLASES) + POST-PROCESSING")
+             "NON-LINEAR REGISTRATION (50 ATLASES, NO POST-PROCESSING)")
 
 print("\n" + "=" * 60)
 print("  ALL DONE")
