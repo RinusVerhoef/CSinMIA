@@ -1,8 +1,9 @@
 """
-Overnight batch script — runs TWO phases back-to-back:
-  Phase 1: Affine-only registration  -> capita_results/affine/
-  Phase 2: BSpline registration      -> capita_results/
-Both phases have resume capability (skip patients with existing PNGs).
+Full pipeline: 64 affine -> top 10 -> BSpline -> best 5 -> fusion -> post-processing
+Post-processing: largest connected component + fill holes
+Atlases: first 64 patients (0-63). Test: patients 65-138.
+Saves to capita_results/top64/
+Resume capable (skips patients with existing PNGs).
 """
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -16,7 +17,6 @@ from prostateLoader import ProstateLoader
 from utils import final_metric_from_elastix_log
 
 import gc
-import traceback
 import SimpleITK as sitk
 import matplotlib
 matplotlib.use("Agg")
@@ -38,12 +38,10 @@ def safe_final_metric(max_retries=5, wait_sec=3):
 
 
 # ============================================================
-# Output directories
+# Output directory
 # ============================================================
-OUTPUT_DIR_BSPLINE = Path(r"C:\Users\30697\OneDrive\2.Netherlands\capita_results\first_5")
-OUTPUT_DIR_AFFINE  = OUTPUT_DIR_BSPLINE / "affine"
-OUTPUT_DIR_BSPLINE.mkdir(parents=True, exist_ok=True)
-OUTPUT_DIR_AFFINE.mkdir(parents=True, exist_ok=True)
+OUTPUT_DIR = Path(r"C:\Users\30697\OneDrive\2.Netherlands\capita_results\top64")
+OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
 
 # ============================================================
@@ -80,6 +78,31 @@ def latest_tp(out_dir: Path) -> Path:
 
 def binarize(img: sitk.Image) -> sitk.Image:
     return sitk.Cast(img > 0, sitk.sitkUInt8)
+
+
+def postprocess_mask(mask: sitk.Image) -> sitk.Image:
+    """Post-processing: keep largest connected component + fill holes."""
+    binary = binarize(mask)
+
+    # 1. Keep largest connected component (removes small scattered blobs)
+    cc = sitk.ConnectedComponent(binary)
+    stats = sitk.LabelShapeStatisticsImageFilter()
+    stats.Execute(cc)
+    labels = stats.GetLabels()
+
+    if len(labels) == 0:
+        return binary  # empty mask, nothing to do
+
+    # Find label with most voxels
+    largest_label = max(labels, key=lambda l: stats.GetNumberOfPixels(l))
+    largest = sitk.Equal(cc, largest_label)
+    largest = sitk.Cast(largest, sitk.sitkUInt8)
+
+    # 2. Fill holes (per-slice 2D fill, works well for prostate)
+    filled = sitk.BinaryFillhole(largest)
+    filled = sitk.Cast(filled, sitk.sitkUInt8)
+
+    return filled
 
 
 def dice_score(pred: sitk.Image, gt: sitk.Image) -> float:
@@ -197,10 +220,10 @@ def run_bspline_from_affine(fixed_img, moving_img, affine_tmap, work_dir):
     return registered_img, bs_metric, bs_tp_file
 
 
-def load_all_jsons(out_dir, atlas_size, num_test):
+def load_all_jsons(out_dir, test_start, num_test):
     results = []
     for pat_idx in range(num_test):
-        patient_number = atlas_size + pat_idx
+        patient_number = test_start + pat_idx
         json_path = out_dir / f"patient_{patient_number:03d}_metrics.json"
         if json_path.exists():
             with open(json_path, "r", encoding="utf-8") as jf:
@@ -208,7 +231,7 @@ def load_all_jsons(out_dir, atlas_size, num_test):
     return results
 
 
-def write_report(out_dir, all_results, num_total, title, has_bspline=False):
+def write_report(out_dir, all_results, num_total, title):
     if len(all_results) == 0:
         print("  No patient results found — nothing to report.")
         return
@@ -222,28 +245,23 @@ def write_report(out_dir, all_results, num_total, title, has_bspline=False):
         f.write("=" * 70 + "\n")
         f.write(f"  {title}\n")
         f.write(f"  {len(all_results)}/{num_total} test patients\n")
+        f.write(f"  Post-processing: largest component + fill holes\n")
         f.write("=" * 70 + "\n\n")
 
         f.write("-" * 70 + "\n")
-        if has_bspline:
-            f.write(f"{'Patient':>8}  {'Dice':>6}  {'Jacc':>6}  {'HD(mm)':>7}  "
-                    f"{'RVD':>7}  {'BS ok':>5}  {'BS fail':>7}  {'Time':>6}\n")
-        else:
-            f.write(f"{'Patient':>8}  {'Dice':>6}  {'Jacc':>6}  {'HD(mm)':>7}  "
-                    f"{'RVD':>7}  {'Time':>6}\n")
+        f.write(f"{'Patient':>8}  {'Dice':>6}  {'Jacc':>6}  {'HD(mm)':>7}  "
+                f"{'RVD':>7}  {'BS ok':>5}  {'BS fail':>7}  {'Time':>6}\n")
         f.write("-" * 70 + "\n")
 
         for r in all_results:
-            line = (f"{r['patient_number']:>8}  "
+            f.write(f"{r['patient_number']:>8}  "
                     f"{r['dice']:>6.3f}  "
                     f"{r['jaccard']:>6.3f}  "
                     f"{r['hausdorff']:>7.1f}  "
-                    f"{r['rvd']:>7.3f}  ")
-            if has_bspline:
-                line += (f"{r['n_bs_used']:>5}  "
-                         f"{r['n_bs_fail']:>7}  ")
-            line += f"{r['time_s']:>5.0f}s\n"
-            f.write(line)
+                    f"{r['rvd']:>7.3f}  "
+                    f"{r['n_bs_used']:>5}  "
+                    f"{r['n_bs_fail']:>7}  "
+                    f"{r['time_s']:>5.0f}s\n")
 
         f.write("-" * 70 + "\n")
         f.write(f"{'MEAN':>8}  {np.mean(dices):>6.3f}  {np.mean(jaccs):>6.3f}  "
@@ -262,23 +280,22 @@ def write_report(out_dir, all_results, num_total, title, has_bspline=False):
             f.write(f"Patient {r['patient_number']} (test index {r['test_index']})\n")
             f.write(f"  Dice={r['dice']:.4f}  Jaccard={r['jaccard']:.4f}  "
                     f"HD={r['hausdorff']:.2f}mm  RVD={r['rvd']:.4f}\n")
-            if has_bspline:
-                f.write(f"  BSpline used: {r['n_bs_used']}/10  |  "
-                        f"BSpline failed: {r['n_bs_fail']}/10  |  "
-                        f"BSpline worse: {r['n_bs_worse']}/10\n")
+            f.write(f"  BSpline used: {r['n_bs_used']}/{PRESELECTION_SIZE}  |  "
+                    f"BSpline failed: {r['n_bs_fail']}/{PRESELECTION_SIZE}  |  "
+                    f"BSpline worse: {r['n_bs_worse']}/{PRESELECTION_SIZE}\n")
             f.write(f"  Selected for fusion: {r['selected_for_fusion']}\n")
-            f.write(f"  Time: {r['time_s']:.0f}s\n")
-            if has_bspline:
-                f.write(f"\n  {'Atlas':>6}  {'AffMetric':>9}  {'BSMetric':>9}  "
-                        f"{'Stage':>5}  Error\n")
-                for i in range(len(r["top_indices"])):
-                    bs_str = "fail" if r["bs_metrics"][i] is None else f"{r['bs_metrics'][i]:.4f}"
-                    err = r["bs_errors"][i] or ""
-                    f.write(f"  {r['top_indices'][i]:>6}  "
-                            f"{r['top_affine_metrics'][i]:>9.4f}  "
-                            f"{bs_str:>9}  "
-                            f"{r['used_stage'][i]:>5}  "
-                            f"{err}\n")
+            f.write(f"  Time: {r['time_s']:.0f}s\n\n")
+
+            f.write(f"  {'Atlas':>6}  {'AffMetric':>9}  {'BSMetric':>9}  "
+                    f"{'Stage':>5}  Error\n")
+            for i in range(len(r["top_indices"])):
+                bs_str = "fail" if r["bs_metrics"][i] is None else f"{r['bs_metrics'][i]:.4f}"
+                err = r["bs_errors"][i] or ""
+                f.write(f"  {r['top_indices'][i]:>6}  "
+                        f"{r['top_affine_metrics'][i]:>9.4f}  "
+                        f"{bs_str:>9}  "
+                        f"{r['used_stage'][i]:>5}  "
+                        f"{err}\n")
             f.write("\n")
 
     print(f"  Report: {report_path}")
@@ -289,15 +306,16 @@ def write_report(out_dir, all_results, num_total, title, has_bspline=False):
 # ============================================================
 # Settings
 # ============================================================
-ATLAS_SIZE = 5
-PRESELECTION_SIZE = 5
+ATLAS_SIZE = 64
+TEST_START = 65          # test patients start at patient 65
+PRESELECTION_SIZE = 10
 FUSION_SIZE = 5
 VISUALISATION_SLICE = 15
 VOTE_THRESHOLD = None
 BSPLINE_BLACKLIST = {34}
 
 # ============================================================
-# Load data (once — shared by both phases)
+# Load data
 # ============================================================
 t_global_start = time.perf_counter()
 
@@ -307,13 +325,15 @@ images, segmen = loader.LoadData()
 atlas_images = images[0:ATLAS_SIZE]
 atlas_segmen = segmen[0:ATLAS_SIZE]
 
-test_images = images[ATLAS_SIZE:]
-test_segmen = segmen[ATLAS_SIZE:]
+test_images = images[TEST_START:]
+test_segmen = segmen[TEST_START:]
 NUM_TEST_PATIENTS = len(test_images)
 
-print(f"Loaded {len(images)} volumes.  Atlas: {ATLAS_SIZE}  Test: {NUM_TEST_PATIENTS}")
-print(f"Patients {ATLAS_SIZE}..{ATLAS_SIZE + NUM_TEST_PATIENTS - 1}")
-print(f"BSpline results: {OUTPUT_DIR_BSPLINE}\n")
+print(f"Loaded {len(images)} volumes.  Atlas: {ATLAS_SIZE} (patients 0-{ATLAS_SIZE-1})  Test: {NUM_TEST_PATIENTS}")
+print(f"Test patients {TEST_START}..{TEST_START + NUM_TEST_PATIENTS - 1}")
+print(f"Pipeline: {ATLAS_SIZE} affine -> top {PRESELECTION_SIZE} -> BSpline -> best {FUSION_SIZE} -> fusion -> post-processing")
+print(f"Post-processing: largest connected component + fill holes")
+print(f"Output: {OUTPUT_DIR}\n")
 
 plt.rcParams.update({
     "font.size": 10,
@@ -323,41 +343,31 @@ plt.rcParams.update({
 
 
 # ################################################################
-#  PHASE 1 — AFFINE-ONLY REGISTRATION  (SKIPPED FOR NOW)
+#  MAIN LOOP
 # ################################################################
-print("#" * 60)
-print("  PHASE 1: SKIPPED — running BSpline only")
-print("#" * 60 + "\n")
-
-
-# ################################################################
-#  PHASE 2 — BSPLINE REGISTRATION
-# ################################################################
-print("#" * 60)
-print("  PHASE 2: BSPLINE REGISTRATION")
-print("#" * 60 + "\n")
-
-t_phase2_start = time.perf_counter()
+t_start = time.perf_counter()
 
 for pat_idx in range(NUM_TEST_PATIENTS):
-    patient_number = ATLAS_SIZE + pat_idx
+    patient_number = TEST_START + pat_idx
 
     # Resume check
-    fig1_check = OUTPUT_DIR_BSPLINE / f"patient_{patient_number:03d}_atlases.png"
-    fig2_check = OUTPUT_DIR_BSPLINE / f"patient_{patient_number:03d}_segmentation.png"
+    fig1_check = OUTPUT_DIR / f"patient_{patient_number:03d}_atlases.png"
+    fig2_check = OUTPUT_DIR / f"patient_{patient_number:03d}_segmentation.png"
     if fig1_check.exists() and fig2_check.exists():
-        print(f"[BS] {pat_idx+1}/{NUM_TEST_PATIENTS} patient {patient_number} — SKIP")
+        print(f"{pat_idx+1}/{NUM_TEST_PATIENTS} patient {patient_number} — SKIP")
         continue
 
     print("=" * 60)
-    print(f"[BS] {pat_idx+1}/{NUM_TEST_PATIENTS}  patient {patient_number}")
+    print(f"{pat_idx+1}/{NUM_TEST_PATIENTS}  patient {patient_number}")
     print("=" * 60)
 
     t0 = time.perf_counter()
     fixed_img = test_images[pat_idx]
     gt_mask = test_segmen[pat_idx]
 
+    # ----------------------------------------------------------
     # Affine registration for all 50 atlases
+    # ----------------------------------------------------------
     elx = sitk.ElastixImageFilter()
     elx.SetFixedImage(fixed_img)
     pm_affine = sitk.ReadParameterFile("ParameterFiles/Affine/affine.txt")
@@ -379,7 +389,11 @@ for pat_idx in range(NUM_TEST_PATIENTS):
         reg_results.append(registered_img)
         transforms.append(tmap)
 
-    # Preselection of top K
+    t1 = time.perf_counter()
+
+    # ----------------------------------------------------------
+    # Preselection of top 10 based on affine metric
+    # ----------------------------------------------------------
     results = list(zip(range(len(atlas_images)), metrics, transforms,
                        atlas_images, atlas_segmen, reg_results))
     results_sorted = sorted(results, key=lambda t: t[1], reverse=True)
@@ -392,7 +406,9 @@ for pat_idx in range(NUM_TEST_PATIENTS):
     top_segmen_sel = [r[4] for r in top_results]
     top_reg        = [r[5] for r in top_results]
 
-    # BSpline refinement on top K
+    # ----------------------------------------------------------
+    # BSpline refinement on top 10
+    # ----------------------------------------------------------
     final_images = []
     final_transform_files = []
     bs_metrics = []
@@ -458,7 +474,9 @@ for pat_idx in range(NUM_TEST_PATIENTS):
 
         t3 = time.perf_counter()
 
-        # Select best FUSION_SIZE by final metric
+        # ----------------------------------------------------------
+        # Select best 5 by final metric
+        # ----------------------------------------------------------
         final_metric_values = []
         for i in range(len(top_indices)):
             if used_stage[i] == "BS" and bs_metrics[i] is not None:
@@ -470,7 +488,9 @@ for pat_idx in range(NUM_TEST_PATIENTS):
                         key=lambda k: final_metric_values[k], reverse=True)
         selected_indices = ranked[:FUSION_SIZE]
 
+        # ----------------------------------------------------------
         # Warp masks & fuse
+        # ----------------------------------------------------------
         warped_masks = []
         for i in selected_indices:
             atlas_idx = top_indices[i]
@@ -482,6 +502,13 @@ for pat_idx in range(NUM_TEST_PATIENTS):
             warped_masks.append(warped_mask)
 
         fused_mask = vote_fusion(warped_masks, vote_threshold=VOTE_THRESHOLD)
+
+        # ----------------------------------------------------------
+        # POST-PROCESSING: largest component + fill holes
+        # ----------------------------------------------------------
+        fused_mask = postprocess_mask(fused_mask)
+        print("  Post-processing applied (largest component + fill holes)")
+
         dice = dice_score(fused_mask, gt_mask)
         jacc = jaccard_score(fused_mask, gt_mask)
         hd   = hausdorff_distance_mm(fused_mask, gt_mask)
@@ -489,7 +516,9 @@ for pat_idx in range(NUM_TEST_PATIENTS):
 
         t4 = time.perf_counter()
 
+        # ----------------------------------------------------------
         # Save figure 1: atlas comparison
+        # ----------------------------------------------------------
         n_panels = 1 + len(final_images)
         n_cols = 4
         n_rows = math.ceil(n_panels / n_cols)
@@ -516,17 +545,19 @@ for pat_idx in range(NUM_TEST_PATIENTS):
             axes[k].axis("off")
         fig1.subplots_adjust(left=0.03, right=0.99, bottom=0.05, top=0.90,
                              wspace=0.08, hspace=0.35)
-        fig1.savefig(OUTPUT_DIR_BSPLINE / f"patient_{patient_number:03d}_atlases.png",
+        fig1.savefig(OUTPUT_DIR / f"patient_{patient_number:03d}_atlases.png",
                      bbox_inches="tight")
         plt.close(fig1)
 
+        # ----------------------------------------------------------
         # Save figure 2: segmentation result
+        # ----------------------------------------------------------
         fixed_np = sitk.GetArrayFromImage(fixed_img)
         fused_np = sitk.GetArrayFromImage(binarize(fused_mask))
         gt_np    = sitk.GetArrayFromImage(binarize(gt_mask))
         fig2, axes2 = plt.subplots(1, 3, figsize=(16, 5.8), dpi=120)
         fig2.suptitle(
-            f"Patient {patient_number} — Segmentation result\n"
+            f"Patient {patient_number} — Segmentation (post-processed)\n"
             f"Dice: {dice:.3f} | Jaccard: {jacc:.3f} | "
             f"Hausdorff: {hd:.3f} mm | RVD: {rvd:.3f}", fontsize=14, y=0.97)
         axes2[0].imshow(fixed_np[VISUALISATION_SLICE], cmap="gray")
@@ -535,7 +566,7 @@ for pat_idx in range(NUM_TEST_PATIENTS):
         axes2[1].imshow(fixed_np[VISUALISATION_SLICE], cmap="gray")
         axes2[1].imshow(np.ma.masked_where(fused_np[VISUALISATION_SLICE]==0,
                         fused_np[VISUALISATION_SLICE]), cmap="Reds", alpha=0.4)
-        axes2[1].set_title("Fused prediction", fontsize=13, pad=8)
+        axes2[1].set_title("Fused prediction (post-processed)", fontsize=13, pad=8)
         axes2[1].set_xticks([]); axes2[1].set_yticks([])
         axes2[2].imshow(fixed_np[VISUALISATION_SLICE], cmap="gray")
         axes2[2].imshow(np.ma.masked_where(gt_np[VISUALISATION_SLICE]==0,
@@ -543,10 +574,13 @@ for pat_idx in range(NUM_TEST_PATIENTS):
         axes2[2].set_title("Ground truth mask", fontsize=13, pad=8)
         axes2[2].set_xticks([]); axes2[2].set_yticks([])
         fig2.subplots_adjust(left=0.03, right=0.99, bottom=0.06, top=0.80, wspace=0.03)
-        fig2.savefig(OUTPUT_DIR_BSPLINE / f"patient_{patient_number:03d}_segmentation.png",
+        fig2.savefig(OUTPUT_DIR / f"patient_{patient_number:03d}_segmentation.png",
                      bbox_inches="tight")
         plt.close(fig2)
 
+    # ----------------------------------------------------------
+    # Store per-patient results
+    # ----------------------------------------------------------
     pat_time = t4 - t0
     n_bs_used = sum(1 for s in used_stage if s == "BS")
     n_bs_fail = sum(1 for b in bs_metrics if b is None)
@@ -566,7 +600,7 @@ for pat_idx in range(NUM_TEST_PATIENTS):
         "selected_for_fusion": [top_indices[i] for i in selected_indices],
         "bs_errors": list(bs_errors),
     }
-    json_path = OUTPUT_DIR_BSPLINE / f"patient_{patient_number:03d}_metrics.json"
+    json_path = OUTPUT_DIR / f"patient_{patient_number:03d}_metrics.json"
     with open(json_path, "w", encoding="utf-8") as jf:
         json.dump(patient_result, jf, indent=2, default=str)
 
@@ -577,21 +611,20 @@ for pat_idx in range(NUM_TEST_PATIENTS):
     del warped_masks, fused_mask, fixed_img, gt_mask
     gc.collect()
 
-# Phase 2 report
-t_phase2_end = time.perf_counter()
+# ============================================================
+# Report
+# ============================================================
+t_end = time.perf_counter()
 print("\n" + "#" * 60)
-print("  PHASE 2 COMPLETE — Writing BSpline report")
+print("  COMPLETE — Writing report")
 print("#" * 60)
-bs_results = load_all_jsons(OUTPUT_DIR_BSPLINE, ATLAS_SIZE, NUM_TEST_PATIENTS)
-print(f"  Loaded {len(bs_results)}/{NUM_TEST_PATIENTS} BSpline results.")
-write_report(OUTPUT_DIR_BSPLINE, bs_results, NUM_TEST_PATIENTS,
-             "NON-LINEAR REGISTRATION REPORT", has_bspline=True)
-print(f"  Phase 2 time: {(t_phase2_end - t_phase2_start)/60:.1f} min\n")
+all_results = load_all_jsons(OUTPUT_DIR, TEST_START, NUM_TEST_PATIENTS)
+print(f"  Loaded {len(all_results)}/{NUM_TEST_PATIENTS} results.")
+write_report(OUTPUT_DIR, all_results, NUM_TEST_PATIENTS,
+             "NON-LINEAR REGISTRATION (64 ATLASES) + POST-PROCESSING")
 
-# Final summary
-t_global_end = time.perf_counter()
 print("\n" + "=" * 60)
 print("  ALL DONE")
 print("=" * 60)
-print(f"Total time: {(t_global_end - t_global_start)/60:.1f} min")
-print(f"BSpline results: {OUTPUT_DIR_BSPLINE}")
+print(f"Total time: {(t_end - t_global_start)/60:.1f} min")
+print(f"Results: {OUTPUT_DIR}")
