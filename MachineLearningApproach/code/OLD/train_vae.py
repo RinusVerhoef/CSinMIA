@@ -86,10 +86,10 @@ valid_dataloader = DataLoader(
 )
 
 # initialise model, optimiser
-vae_model = vae.VAE().to(device)
-optimizer = torch.optim.Adam(vae_model.parameters(), lr=LEARNING_RATE)
+vae_model = # TODO 
+optimizer = # TODO 
 # add a learning rate scheduler based on the lr_lambda function
-scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
+scheduler = # TODO
 
 # training loop
 writer = SummaryWriter(log_dir=TENSORBOARD_LOGDIR)  # tensorboard summary
@@ -97,17 +97,9 @@ for epoch in range(N_EPOCHS):
     current_train_loss = 0.0
     current_valid_loss = 0.0
     
-    # TODO
-    vae_model.train() # set model to training mode 
+    # TODO 
     # training iterations
     for x_real, y_real in tqdm(dataloader, position=0):
-        x_real = x_real.to(device)
-        optimizer.zero_grad() # zero the gradients
-        x_recon, mu, logvar = vae_model(x_real) # forward pass
-        loss = vae.vae_loss(x_real, x_recon, mu, logvar) # compute loss
-        loss.backward() # backpropagate
-        optimizer.step() # update weights
-        current_train_loss += loss.item() # accumulate training loss
 
 
     writer.add_scalar("Loss/train", current_train_loss / len(dataloader), epoch)
@@ -117,11 +109,7 @@ for epoch in range(N_EPOCHS):
     with torch.no_grad():
         vae_model.eval()
         for x_real, y_real in tqdm(valid_dataloader, position=0):
-            # TODO
-            x_real = x_real.to(device)
-            x_recon, mu, logvar = vae_model(x_real) # forward pass
-            loss = vae.vae_loss(x_real, x_recon, mu, logvar) # compute loss
-            current_valid_loss += loss.item() # accumulate validation loss 
+        # TODO 
         
         # write to tensorboard log
         writer.add_scalar(
@@ -138,10 +126,8 @@ for epoch in range(N_EPOCHS):
                 "Real_fake", np.clip(img_grid[0][np.newaxis], -1, 1) / 2 + 0.5, epoch + 1
             )
         
-            # TODO: sample noise
-            z = vae.get_noise(10,Z_DIM, device=device) # sample noise
+            # TODO: sample noise 
             # TODO: generate 10 images and display
-            image_samples = vae_model.generator(z) # generate 10 images
             img_grid = make_grid(
                 torch.cat((image_samples[:5].cpu(), image_samples[5:].cpu())),
                 nrow=5,

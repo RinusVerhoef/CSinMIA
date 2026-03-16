@@ -18,10 +18,10 @@ class Block(nn.Module):
     def __init__(self, in_ch, out_ch):
         super().__init__()
         self.conv1 = nn.Conv2d(in_ch, out_ch, 3, padding=1)
-        self.bn1 = nn.BatchNorm2d(out_ch) # batch normalisation
+        self.bn1 = # TODO   # batch normalisation
         self.conv2 = nn.Conv2d(out_ch, out_ch, 3, padding=1)
-        self.bn2 = nn.BatchNorm2d(out_ch) # batch normalisation
-        self.lrelu = nn.LeakyReLU(0.05)  # leaky ReLU
+        self.bn2 = # TODO 
+        self.lrelu =  # TODO  # leaky ReLU
 
 
     def forward(self, x):
@@ -34,13 +34,9 @@ class Block(nn.Module):
         """
         # a block consists of two convolutional layers
         # with ReLU activations
+        # use batch normalisation
 
-        x = self.conv1(x)
-        x = self.bn1(x)
-        x = self.lrelu(x)
-        x = self.conv2(x)
-        x = self.bn2(x)
-        x = self.lrelu(x)
+        # TODO
         return x
 
 
@@ -61,12 +57,12 @@ class Encoder(nn.Module):
         super().__init__()
         # convolutional blocks
         self.enc_blocks = nn.ModuleList(
-            [Block(chs[i], chs[i + 1]) for i in range(len(chs) - 1)]
+            # TODO
         )
         # max pooling
-        self.pool = nn.MaxPool2d(kernel_size=2, stride=2)
+        self.pool = # TODO
         # height and width of images at lowest resolution level
-        _h, _w = spatial_size[0] // (2 ** (len(chs) - 1)), spatial_size[1] // (2 ** (len(chs) - 1))
+        _h, _w = # TODO
 
         # flattening
         self.out = nn.Sequential(nn.Flatten(1), nn.Linear(chs[-1] * _h * _w, 2 * z_dim))
@@ -87,9 +83,9 @@ class Encoder(nn.Module):
         """
 
         for block in self.enc_blocks:
-            x = block(x)        # conv block           
-            x = self.pool(x)    # pooling
-        x=self.out(x)           # output layer          
+            # TODO: conv block           
+            # TODO: pooling 
+        # TODO: output layer          
         return torch.chunk(x, 2, dim=1)  # 2 chunks, 1 each for mu and logvar
 
 
@@ -123,12 +119,12 @@ class Generator(nn.Module):
         )  # reshaping
 
         self.upconvs = nn.ModuleList(
-            [nn.ConvTranspose2d(chs[i], chs[i + 1], kernel_size=2, stride=2) for i in range(len(chs) - 1)]          
-        )   # transposed convolution
+            # TODO: transposed convolution            
+        )
 
         self.dec_blocks = nn.ModuleList(
-            [Block(chs[i], chs[i + 1]) for i in range(len(chs) - 1)]
-        )   # convolutional block
+            # TODO: conv block           
+        )
         self.head = nn.Sequential(
             nn.Conv2d(self.chs[-1], 1, kernel_size=3, padding=1),
             nn.Tanh(),
@@ -147,11 +143,11 @@ class Generator(nn.Module):
         x : torch.Tensor
         
         """
-        x = self.proj_z(z) # fully connected layer
-        x = self.reshape(x) # reshape to image dimensions
+        x = # TODO: fully connected layer
+        x = # TODO: reshape to image dimensions
         for i in range(len(self.chs) - 1):
-            x = self.upconvs[i](x) # transposed convolution
-            x = self.dec_blocks[i](x) # convolutional block
+            # TODO: transposed convolution
+            # TODO: convolutional block
         return self.head(x)
 
 
