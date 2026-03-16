@@ -79,12 +79,14 @@ class Encoder(nn.Module):
             contains the outputs of each block in the encoder
         """
         ftrs = []  # a list to store features
-        for block in self.enc_blocks:
+        for block in self.enc_blocks[:-1]:  # for all blocks except the last one
             x = block(x)        
             # # save features to concatenate to decoder blocks
-            ftrs.append(x)
+            ftrs.append(x)          # save features for skip connections
             x = self.pool(x)
-        ftrs.append(x) # save features
+        # for the last block, we don't apply max pooling
+        x = self.enc_blocks[-1](x)
+        ftrs.append(x) # bottom feature
         return ftrs
 
 
@@ -103,10 +105,10 @@ class Decoder(nn.Module):
         super().__init__()
         self.chs = chs
         self.upconvs = nn.ModuleList(
-            # TODO: transposed convolution
+            [nn.ConvTranspose2d(chs[i], chs[i + 1], kernel_size=2, stride=2) for i in range(len(chs) - 1)]
         )
         self.dec_blocks = nn.ModuleList(
-            # TODO: convolutional blocks
+            [Block(2 * chs[i + 1], chs[i + 1]) for i in range(len(chs) - 1)]
         )
 
     def forward(self, x, encoder_features):
@@ -126,13 +128,13 @@ class Decoder(nn.Module):
         """
         for i in range(len(self.chs) - 1):
             # transposed convolution
-            # TODO
+            x = self.upconvs[i](x)
             # get the features from the corresponding level of the encoder
-            # TODO
+            enc_f = encoder_features[-(i + 2)]
             # concatenate these features to x
-            x = # TODO
+            x = torch.cat([x, enc_f], dim=1)
             # convolutional block
-            x = # TODO
+            x = self.dec_blocks[i](x)
 
 
         return x
@@ -153,8 +155,8 @@ class UNet(nn.Module):
 
     def __init__(
         self,
-        enc_chs=(1, 64, 128, 256),
-        dec_chs=(256, 128, 64, 32),
+        enc_chs=(1, 64, 128, 256),          # right now, 2 times pooling is applied, and 2 times upsampling
+        dec_chs=(256, 128, 64),             # can be changed to apply more pooling/upsampling
         num_classes=1,
     ):
         super().__init__()
@@ -163,7 +165,14 @@ class UNet(nn.Module):
         self.head = nn.Sequential(
             nn.Conv2d(dec_chs[-1], num_classes, 1),
         )  # output layer
-
+        assert enc_chs[-1] == dec_chs[0], (
+            f"Decoder expects bottom channels {dec_chs[0]} "
+            f"to match encoder's last output {enc_chs[-1]}"
+        )
+        assert len(dec_chs) == len(enc_chs) - 1, (
+            "Number of decoder stages must equal number of encoder poolings: "
+            f"got len(dec_chs)={len(dec_chs)} vs len(enc_chs)-1={len(enc_chs)-1}"
+        )
     def forward(self, x):
         """Performs the forward pass of the unet.
        
@@ -177,10 +186,9 @@ class UNet(nn.Module):
         out : torch.Tensor
             unet output, the logits of the predicted segmentation mask
         """
-
-        # TODO
-        
+       
         enc_ftrs = self.encoder(x)
-        # then apply decoding 
-        # and output layer
+        x = self.decoder(enc_ftrs[-1], enc_ftrs)
+        out = self.head(x)
         return out
+

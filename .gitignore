@@ -10,3 +10,5 @@ ParameterFiles/BSpline/.claude/worktrees/xenodochial-chaum/
 ParameterFiles/BSpline/.claude/worktrees/practical-spence/
 ParameterFiles/BSpline/.claude/worktrees/interesting-carson/
 ParameterFiles/BSpline/.claude/worktrees/affectionate-keller/
+segmentation_model_weights/
+segmentation_runs/
