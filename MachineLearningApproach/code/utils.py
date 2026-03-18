@@ -5,6 +5,7 @@ import SimpleITK as sitk
 import torch
 import torch.nn as nn
 import torchvision.transforms as transforms
+from torchvision.transforms import functional as TF
 
 
 class ProstateMRDataset(torch.utils.data.Dataset):
@@ -19,6 +20,7 @@ class ProstateMRDataset(torch.utils.data.Dataset):
     """
 
     def __init__(self, paths, img_size, valid=False):
+        self.valid = valid
         self.mr_image_list = []
         self.mask_list = []
         # load images
@@ -82,6 +84,8 @@ class ProstateMRDataset(torch.utils.data.Dataset):
         ----------
         index : int
             index of the image/segmentation in dataset
+        valid : bool, optional
+            whether the data is for validation
         """
 
         # compute which slice an index corresponds to
@@ -100,8 +104,34 @@ class ProstateMRDataset(torch.utils.data.Dataset):
         y = self.img_transform(
             (self.mask_list[patient][the_slice, ...] > 0).astype(np.int32)
         )
-        return x, y
+        
+        # Augmentation for training data
+        if not self.valid:
+            # Original image shapes
+            h, w = x.shape[-2:], x.shape[-1:]
+            # Horizontal mirroring
+            if random.random() > 0.5:
+                x = TF.hflip(x)
+                y = TF.hflip(y)
 
+            # Rotation
+            angle = random.uniform(-5, 5)
+            x = TF.rotate(x, angle, interpolation=transforms.InterpolationMode.BILINEAR)
+            y = TF.rotate(y, angle, interpolation=transforms.InterpolationMode.NEAREST)
+
+            # Random cropping
+            h, w = x.shape[-2:]
+            crop_pct = random.uniform(0.05, 0.10)  # Only small cropping to avoid losing prostate
+            ch, cw = int(h * (1 - crop_pct)), int(w * (1 - crop_pct))
+            # Pick a random top-left corner for cropping
+            top = random.randint(0, h - ch)
+            left = random.randint(0, w - cw)
+            x = TF.crop(x, top, left, ch, cw)
+            y = TF.crop(y, top, left, ch, cw)
+            # Resize back to original size
+            x = TF.resize(x, (h, w))
+            y = TF.resize(y, (h, w), interpolation=transforms.InterpolationMode.NEAREST)
+        return x, y
 
 class DiceBCELoss(nn.Module):
     """Loss function, computed as the sum of Dice score and binary cross-entropy.

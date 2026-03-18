@@ -15,13 +15,11 @@ random.seed(42)
 # find out if a GPU is available
 if torch.cuda.is_available():
     device = torch.device("cuda")
-    print("Using GPU:", torch.cuda.get_device_name(0))
 elif torch.backends.mps.is_available():
     device = torch.device("mps")
-    print("Using Apple Silicon GPU")
 else:
     device = torch.device("cpu")
-    print("Using CPU")
+
 # directorys with data and to store training checkpoints and logs
 DATA_DIR = Path.cwd() / "prostate158_train" / "train"
 CHECKPOINTS_DIR = Path.cwd() / "segmentation_model_weights"
@@ -35,6 +33,7 @@ BATCH_SIZE = 32
 N_EPOCHS = 100
 LEARNING_RATE = 1e-4
 TOLERANCE = 0.01  # for early stopping
+AUG_FRACTION = 2.0  # how many augmented samples generated per original sample
 
 # find patient folders in training directory
 # excluding hidden folders (start with .)
@@ -51,13 +50,30 @@ partition = {
     "validation": patients[-NO_VALIDATION_PATIENTS:],
 }
 
-# load training data and create DataLoader with batching and shuffling
-dataset = utils.ProstateMRDataset(partition["train"], IMAGE_SIZE)
+orig_dataset = utils.ProstateMRDataset(partition["train"], IMAGE_SIZE, valid=True)
+augm_dataset = utils.ProstateMRDataset(partition["train"], IMAGE_SIZE, valid=False)
+
+class AugmentedDataset(torch.utils.data.Dataset):
+    def __init__(self, dataset, repeats):
+        self.dataset = dataset
+        self.repeats = max(0, int(repeats))
+
+    def __len__(self):
+        return len(self.dataset) * (self.repeats)
+    
+    def __getitem__(self, idx):
+        return self.dataset[idx % len(self.dataset)]
+    
+# create augmented dataset with repeated samples (training data)
+augm_dataset = AugmentedDataset(augm_dataset, repeats=AUG_FRACTION)
+
+full_dataset = torch.utils.data.ConcatDataset([orig_dataset, augm_dataset])
+
 dataloader = DataLoader(
-    dataset,
-    batch_size=BATCH_SIZE,
-    shuffle=True,
-    drop_last=True,
+    full_dataset, 
+    batch_size=BATCH_SIZE, 
+    shuffle=True, 
+    drop_last=True, 
     pin_memory=True,
 )
 
