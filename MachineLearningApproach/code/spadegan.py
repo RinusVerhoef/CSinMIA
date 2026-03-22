@@ -58,7 +58,7 @@ class Encoder(nn.Module):
         hold the number of input channels for each encoder block
     """
 
-    def __init__(self, spatial_size=[64, 64], z_dim=256, chs=(1, 64, 128, 256)):
+    def __init__(self, spatial_size=[64, 64], z_dim=128, chs=(1, 64, 128, 256)):
         super().__init__()
         # convolutional blocks
         self.enc_blocks = nn.ModuleList(
@@ -228,7 +228,7 @@ class SPADE_Generator(nn.Module):
         width of image at lowest resolution level, by default 8
     """
 
-    def __init__(self, z_dim=256, chs=(256, 128, 64, 32), semantic_nc=1, h=8, w=8):
+    def __init__(self, z_dim=128, chs=(256, 128, 64, 32), semantic_nc=1, h=8, w=8):
 
         super().__init__()
         self.chs = chs

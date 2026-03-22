@@ -115,7 +115,7 @@ class ProstateMRDataset(torch.utils.data.Dataset):
                 y = TF.hflip(y)
 
             # Rotation
-            angle = random.uniform(-5, 5)
+            angle = random.uniform(-10, 10)
             x = TF.rotate(x, angle, interpolation=transforms.InterpolationMode.BILINEAR)
             y = TF.rotate(y, angle, interpolation=transforms.InterpolationMode.NEAREST)
 

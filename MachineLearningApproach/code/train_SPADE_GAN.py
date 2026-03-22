@@ -31,17 +31,17 @@ TENSORBOARD_LOGDIR = "vae_runs"
 # training settings and hyperparameters
 NO_VALIDATION_PATIENTS = 20
 IMAGE_SIZE = [64, 64]
-BATCH_SIZE = 32
-N_EPOCHS = 250
+BATCH_SIZE = 64
+N_EPOCHS = 500
 DECAY_LR_AFTER = 100
 LEARNING_RATE = 1e-4
-DISPLAY_FREQ = 10
+DISPLAY_FREQ = 1
 
 # dimension of VAE latent space
-Z_DIM = 256
+Z_DIM = 128
 
 LAMBDA_REC = 10.0
-LAMBDA_KL = 1.0
+LAMBDA_KL = 2.0
 LAMBDA_GAN = 1.0
 
 
@@ -102,7 +102,7 @@ optimizer_G = torch.optim.Adam(
 
 optimizer_D = torch.optim.Adam(
     model.discriminator.parameters(),
-    lr=LEARNING_RATE,
+    lr=LEARNING_RATE * 0.6,
     betas=(0.5, 0.999),
 )
 
@@ -118,6 +118,7 @@ best_valid_loss = float("inf")
 # training loop
 writer = SummaryWriter(log_dir=TENSORBOARD_LOGDIR)  # tensorboard summary
 for epoch in range(N_EPOCHS):
+    print(f"Epoch {epoch+1}/{N_EPOCHS}")
     model.train()  # set model to training mode
 
     current_train_rec = 0.0
@@ -228,7 +229,7 @@ for epoch in range(N_EPOCHS):
         # save examples of real/fake images
         if (epoch + 1) % DISPLAY_FREQ == 0:
             img_grid = make_grid(
-                torch.cat((x_recon[:5], x_real[:5])), nrow=5, padding=12, pad_value=-1
+                torch.cat((x_recon[:5].cpu(), x_real[:5].cpu())), nrow=5, padding=12, pad_value=-1
             )
             writer.add_image(
                 "Real_fake",
