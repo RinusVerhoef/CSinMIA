@@ -1,20 +1,10 @@
 """
-Optimized pipeline: 64 affine -> top 7 -> BSpline (optimized) -> best 5 -> fusion
-Patients 64-138. Resume capable.
-Saves to capita_results/optimized_bs/
-
-BSpline changes vs original:
-  - Bending penalty 0.05 -> 0.01 (more aggressive deformation)
-  - Grid spacing 24 -> 16 (finer control points)
-  - Iterations 512 -> 384 (convergence by then)
-  - Samples 4096 -> 6000 (better gradient estimation)
-  - Sampling attempts 8 -> 12 (fewer failures)
-  - Grid schedule 4x -> 2x -> 1x (smoother coarse-to-fine)
-  - Preselect 7 instead of 5 (more BSpline candidates)
+Single patient: 64 affine -> top 5 -> BSpline (original) -> best 5 -> fusion
+Change TEST_PATIENT to run a different patient.
+Shows all 5 atlas registered images with affine/BSpline metrics.
 """
 from pathlib import Path
 from tempfile import TemporaryDirectory
-import json
 import re
 import time
 import math
@@ -61,6 +51,13 @@ def last_parameter_map(tmap):
         return tmap[-1]
     except Exception:
         return tmap
+
+
+def latest_tp(out_dir):
+    tps = sorted(Path(out_dir).glob("TransformParameters.*.txt"))
+    if not tps:
+        raise FileNotFoundError(f"No TransformParameters.*.txt in {out_dir}")
+    return tps[-1]
 
 
 def binarize(img):
@@ -139,250 +136,303 @@ def warp_label(label_img, tmap, out_dir):
     return sitk.Cast(tfx.GetResultImage() > 0.5, sitk.sitkUInt8)
 
 
+def warp_image(moving_img, tmap, out_dir):
+    """Warp an IMAGE (not label) using the transform — keeps BSpline interpolation."""
+    out_dir.mkdir(parents=True, exist_ok=True)
+    tp_file = out_dir / "tp_img.txt"
+    sitk.WriteParameterFile(last_parameter_map(tmap), str(tp_file))
+    tp_text = tp_file.read_text(encoding="utf-8")
+    tp_text = re.sub(
+        r'\(InitialTransformParametersFileName\s+"[^"]*"\)',
+        '(InitialTransformParametersFileName "NoInitialTransform")', tp_text)
+    tp_file.write_text(tp_text, encoding="utf-8")
+    tfx = sitk.TransformixImageFilter()
+    tfx.SetMovingImage(moving_img)
+    tfx.SetTransformParameterMap(sitk.ReadParameterFile(str(tp_file)))
+    tfx.SetOutputDirectory(str(out_dir))
+    tfx.LogToConsoleOff()
+    tfx.LogToFileOff()
+    tfx.Execute()
+    return tfx.GetResultImage()
+
+
 # ============================================================
-# Settings
+# Settings — change TEST_PATIENT to run a different patient
 # ============================================================
 ATLAS_SIZE = 64
-TEST_START = 64           # first test patient
-PRESELECTION_SIZE = 7     # top 7 go to BSpline
-FUSION_SIZE = 5           # best 5 for majority vote
+TEST_PATIENT = 96
+PRESELECTION_SIZE = 5
+FUSION_SIZE = 5
 BSPLINE_BLACKLIST = {34}
 VISUALISATION_SLICE = 15
-SAVE_DIR = Path(r"C:\Users\30697\OneDrive\2.Netherlands\capita_results\optimized_bs")
+SAVE_DIR = Path(r"C:\Users\30697\OneDrive\2.Netherlands\capita_results")
 
 # ============================================================
 print("Loading data...")
-t0_global = time.perf_counter()
+t0 = time.perf_counter()
 
 loader = ProstateLoader()
 images, segmen = loader.LoadData()
 
-NUM_VOLUMES = len(images)
 atlas_images = images[0:ATLAS_SIZE]
 atlas_segmen = segmen[0:ATLAS_SIZE]
-
-SAVE_DIR.mkdir(parents=True, exist_ok=True)
+fixed_img = images[TEST_PATIENT]
+gt_mask = segmen[TEST_PATIENT]
 
 t_load = time.perf_counter()
-print(f"Loaded in {t_load - t0_global:.1f}s.  Atlas: {ATLAS_SIZE}  Test patients: {TEST_START}-{NUM_VOLUMES-1}")
-print(f"Mode: OPTIMIZED — 64 aff -> top {PRESELECTION_SIZE} -> BSpline -> best {FUSION_SIZE} -> fusion")
+print(f"Loaded in {t_load - t0:.1f}s.  Atlas: {ATLAS_SIZE}  Patient: {TEST_PATIENT}")
 
+# ============================================================
+# Affine registration
+# ============================================================
+print(f"\nAffine registering {ATLAS_SIZE} atlases...")
+t_aff_start = time.perf_counter()
+
+elx = sitk.ElastixImageFilter()
+elx.SetFixedImage(fixed_img)
 pm_affine = sitk.ReadParameterFile(r"C:\Users\30697\OneDrive\2.Netherlands\capita_results\affine.txt")
-BSPLINE_PARAM_FILE = r"C:\Users\30697\OneDrive\2.Netherlands\capita_results\bspline_optimized.txt"
+elx.SetParameterMap(pm_affine)
+elx.LogToConsoleOff()
+elx.LogToFileOn()
 
-all_results = []
+metrics = []
+transforms = []
 
-for test_idx in range(TEST_START, NUM_VOLUMES):
-    fig_path = SAVE_DIR / f"patient_{test_idx:03d}_segmentation.png"
-    if fig_path.exists():
-        print(f"\n--- Patient {test_idx}: SKIPPED (already exists) ---")
-        continue
+for idx, moving_img in enumerate(atlas_images):
+    elx.SetMovingImage(moving_img)
+    elx.Execute()
+    tmap = elx.GetTransformParameterMap()
+    metric = safe_final_metric()
+    metrics.append(metric)
+    transforms.append(tmap)
 
-    print(f"\n{'='*60}")
-    print(f"  PATIENT {test_idx}")
-    print(f"{'='*60}")
+t_aff_end = time.perf_counter()
+print(f"Affine done in {t_aff_end - t_aff_start:.1f}s  ({(t_aff_end - t_aff_start)/ATLAS_SIZE:.1f}s per atlas)")
 
-    t0 = time.perf_counter()
-    fixed_img = images[test_idx]
-    gt_mask = segmen[test_idx]
+# ============================================================
+# Preselect top 5
+# ============================================================
+ranked = sorted(range(ATLAS_SIZE), key=lambda k: metrics[k], reverse=True)
+top_indices = ranked[:PRESELECTION_SIZE]
+top_metrics = [metrics[i] for i in top_indices]
+top_tmaps = [transforms[i] for i in top_indices]
 
-    # --- Affine registration (64 atlases) ---
-    print(f"  Affine registering {ATLAS_SIZE} atlases...")
-    t_aff_start = time.perf_counter()
+print(f"\nTop {PRESELECTION_SIZE} atlases: {top_indices}")
+print(f"Top metrics: {[f'{m:.4f}' for m in top_metrics]}")
 
-    elx = sitk.ElastixImageFilter()
-    elx.SetFixedImage(fixed_img)
-    elx.SetParameterMap(pm_affine)
-    elx.LogToConsoleOff()
-    elx.LogToFileOn()
+# ============================================================
+# BSpline refinement on top 5
+# ============================================================
+print(f"\nBSpline on top {PRESELECTION_SIZE}...")
+t_bs_start = time.perf_counter()
 
-    metrics = []
-    transforms = []
+bs_metrics = []
+bs_tmaps = []
+used_stage = []
+# Store registered atlas IMAGES for visualization
+registered_images = []
 
-    for idx, moving_img in enumerate(atlas_images):
-        elx.SetMovingImage(moving_img)
-        elx.Execute()
-        tmap = elx.GetTransformParameterMap()
-        metric = safe_final_metric()
-        metrics.append(metric)
-        transforms.append(tmap)
+with TemporaryDirectory(prefix="speedtest_") as tmp:
+    tmp_root = Path(tmp)
 
-    t_aff_end = time.perf_counter()
-    print(f"  Affine done in {t_aff_end - t_aff_start:.1f}s  ({(t_aff_end - t_aff_start)/ATLAS_SIZE:.1f}s per atlas)")
+    for i, atlas_idx in enumerate(top_indices):
+        work_dir = tmp_root / f"atlas_{atlas_idx:03d}"
+        work_dir.mkdir(parents=True, exist_ok=True)
 
-    # --- Preselect top 7 ---
-    ranked = sorted(range(ATLAS_SIZE), key=lambda k: metrics[k], reverse=True)
-    top_indices = ranked[:PRESELECTION_SIZE]
-    top_metrics = [metrics[i] for i in top_indices]
-    top_tmaps = [transforms[i] for i in top_indices]
+        # Write affine transform
+        aff_file = work_dir / "affine_tp.txt"
+        sitk.WriteParameterFile(last_parameter_map(top_tmaps[i]), str(aff_file))
+        tp_text = aff_file.read_text(encoding="utf-8")
+        tp_text = re.sub(
+            r'\(InitialTransformParametersFileName\s+"[^"]*"\)',
+            '(InitialTransformParametersFileName "NoInitialTransform")', tp_text)
+        aff_file.write_text(tp_text, encoding="utf-8")
 
-    print(f"  Top {PRESELECTION_SIZE} atlases: {top_indices}")
-    print(f"  Top metrics: {[f'{m:.4f}' for m in top_metrics]}")
+        if atlas_idx in BSPLINE_BLACKLIST:
+            print(f"  Atlas {atlas_idx:03d} SKIPPED (blacklisted)")
+            bs_metrics.append(None)
+            bs_tmaps.append(top_tmaps[i])
+            used_stage.append("AFF")
+            # Warp image with affine for visualization
+            img_dir = tmp_root / f"img_{atlas_idx:03d}"
+            reg_img = warp_image(atlas_images[atlas_idx], top_tmaps[i], img_dir)
+            registered_images.append(sitk.GetArrayFromImage(reg_img))
+            continue
 
-    # --- BSpline refinement on top 7 ---
-    print(f"  BSpline on top {PRESELECTION_SIZE}...")
-    t_bs_start = time.perf_counter()
+        try:
+            pm_bs = sitk.ReadParameterFile("ParameterFiles/BSpline/bspline.txt")
+            pm_bs["InitialTransformParameterFileName"] = [str(aff_file).replace("\\", "/")]
+            pm_bs["HowToCombineTransforms"] = ["Compose"]
 
-    bs_metrics = []
-    bs_tmaps = []
-    used_stage = []
+            elx_bs = sitk.ElastixImageFilter()
+            elx_bs.SetFixedImage(fixed_img)
+            elx_bs.SetMovingImage(atlas_images[atlas_idx])
+            elx_bs.SetParameterMap(pm_bs)
+            elx_bs.SetOutputDirectory(str(work_dir))
+            elx_bs.LogToConsoleOff()
+            elx_bs.LogToFileOn()
+            elx_bs.Execute()
 
-    with TemporaryDirectory(prefix="optbs_") as tmp:
-        tmp_root = Path(tmp)
+            bs_metric = final_metric_from_log(work_dir / "elastix.log")
 
-        for i, atlas_idx in enumerate(top_indices):
-            work_dir = tmp_root / f"atlas_{atlas_idx:03d}"
-            work_dir.mkdir(parents=True, exist_ok=True)
-
-            # Write affine transform
-            aff_file = work_dir / "affine_tp.txt"
-            sitk.WriteParameterFile(last_parameter_map(top_tmaps[i]), str(aff_file))
-            tp_text = aff_file.read_text(encoding="utf-8")
-            tp_text = re.sub(
-                r'\(InitialTransformParametersFileName\s+"[^"]*"\)',
-                '(InitialTransformParametersFileName "NoInitialTransform")', tp_text)
-            aff_file.write_text(tp_text, encoding="utf-8")
-
-            if atlas_idx in BSPLINE_BLACKLIST:
-                print(f"    Atlas {atlas_idx:03d} SKIPPED (blacklisted)")
-                bs_metrics.append(None)
-                bs_tmaps.append(top_tmaps[i])
-                used_stage.append("AFF")
-                continue
-
-            try:
-                pm_bs = sitk.ReadParameterFile(BSPLINE_PARAM_FILE)
-                pm_bs["InitialTransformParameterFileName"] = [str(aff_file).replace("\\", "/")]
-                pm_bs["HowToCombineTransforms"] = ["Compose"]
-
-                elx_bs = sitk.ElastixImageFilter()
-                elx_bs.SetFixedImage(fixed_img)
-                elx_bs.SetMovingImage(atlas_images[atlas_idx])
-                elx_bs.SetParameterMap(pm_bs)
-                elx_bs.SetOutputDirectory(str(work_dir))
-                elx_bs.LogToConsoleOff()
-                elx_bs.LogToFileOn()
-                elx_bs.Execute()
-
-                bs_metric = final_metric_from_log(work_dir / "elastix.log")
-
-                if bs_metric > top_metrics[i]:
-                    print(f"    Atlas {atlas_idx:03d}  AFF={top_metrics[i]:.3f} BS={bs_metric:.3f} -> BS")
-                    bs_metrics.append(bs_metric)
-                    bs_tmaps.append(elx_bs.GetTransformParameterMap())
-                    used_stage.append("BS")
-                else:
-                    print(f"    Atlas {atlas_idx:03d}  AFF={top_metrics[i]:.3f} BS={bs_metric:.3f} -> AFF")
-                    bs_metrics.append(bs_metric)
-                    bs_tmaps.append(top_tmaps[i])
-                    used_stage.append("AFF")
-
-            except Exception as e:
-                print(f"    Atlas {atlas_idx:03d}  FAIL: {str(e)[:80]}")
-                bs_metrics.append(None)
-                bs_tmaps.append(top_tmaps[i])
-                used_stage.append("AFF")
-
-        t_bs_end = time.perf_counter()
-        print(f"  BSpline done in {t_bs_end - t_bs_start:.1f}s")
-
-        # --- Select best 5, warp masks, fuse ---
-        print(f"  Fusion (best {FUSION_SIZE})...")
-        t_fuse_start = time.perf_counter()
-
-        final_metrics = []
-        for i in range(PRESELECTION_SIZE):
-            if used_stage[i] == "BS" and bs_metrics[i] is not None:
-                final_metrics.append(bs_metrics[i])
+            if bs_metric > top_metrics[i]:
+                print(f"  Atlas {atlas_idx:03d}  AFF={top_metrics[i]:.3f} BS={bs_metric:.3f} -> BS")
+                bs_metrics.append(bs_metric)
+                bs_tmaps.append(elx_bs.GetTransformParameterMap())
+                used_stage.append("BS")
+                # Warp image with BSpline for visualization
+                img_dir = tmp_root / f"img_{atlas_idx:03d}"
+                reg_img = warp_image(atlas_images[atlas_idx], elx_bs.GetTransformParameterMap(), img_dir)
+                registered_images.append(sitk.GetArrayFromImage(reg_img))
             else:
-                final_metrics.append(top_metrics[i])
+                print(f"  Atlas {atlas_idx:03d}  AFF={top_metrics[i]:.3f} BS={bs_metric:.3f} -> AFF")
+                bs_metrics.append(bs_metric)
+                bs_tmaps.append(top_tmaps[i])
+                used_stage.append("AFF")
+                # Warp image with affine for visualization
+                img_dir = tmp_root / f"img_{atlas_idx:03d}"
+                reg_img = warp_image(atlas_images[atlas_idx], top_tmaps[i], img_dir)
+                registered_images.append(sitk.GetArrayFromImage(reg_img))
 
-        best5 = sorted(range(PRESELECTION_SIZE), key=lambda k: final_metrics[k], reverse=True)[:FUSION_SIZE]
-        print(f"    Selected atlases: {[top_indices[i] for i in best5]}")
+        except Exception as e:
+            print(f"  Atlas {atlas_idx:03d}  FAIL: {str(e)[:80]}")
+            bs_metrics.append(None)
+            bs_tmaps.append(top_tmaps[i])
+            used_stage.append("AFF")
+            # Warp image with affine for visualization
+            img_dir = tmp_root / f"img_{atlas_idx:03d}"
+            reg_img = warp_image(atlas_images[atlas_idx], top_tmaps[i], img_dir)
+            registered_images.append(sitk.GetArrayFromImage(reg_img))
 
-        warped_masks = []
-        for i in best5:
-            atlas_idx = top_indices[i]
-            warp_dir = tmp_root / f"warp_{atlas_idx:03d}"
-            warped = warp_label(atlas_segmen[atlas_idx], bs_tmaps[i], warp_dir)
-            warped_masks.append(warped)
+    t_bs_end = time.perf_counter()
+    print(f"BSpline done in {t_bs_end - t_bs_start:.1f}s")
 
-        fused_mask = vote_fusion(warped_masks)
+    # ============================================================
+    # Select best 5, warp masks, fuse
+    # ============================================================
+    print(f"\nFusion (best {FUSION_SIZE})...")
+    t_fuse_start = time.perf_counter()
 
-        t_fuse_end = time.perf_counter()
-        print(f"  Fusion done in {t_fuse_end - t_fuse_start:.1f}s")
+    final_metrics = []
+    for i in range(PRESELECTION_SIZE):
+        if used_stage[i] == "BS" and bs_metrics[i] is not None:
+            final_metrics.append(bs_metrics[i])
+        else:
+            final_metrics.append(top_metrics[i])
 
-    # --- Metrics ---
-    dice = dice_score(fused_mask, gt_mask)
-    jacc = jaccard_score(fused_mask, gt_mask)
-    hd = hausdorff_distance_mm(fused_mask, gt_mask)
-    rvd = relative_volume_difference(fused_mask, gt_mask)
+    best5 = sorted(range(PRESELECTION_SIZE), key=lambda k: final_metrics[k], reverse=True)[:FUSION_SIZE]
+    print(f"  Selected atlases: {[top_indices[i] for i in best5]}")
 
-    t_total = time.perf_counter() - t0
-    n_bs = sum(1 for s in used_stage if s == "BS")
+    warped_masks = []
+    for i in best5:
+        atlas_idx = top_indices[i]
+        warp_dir = tmp_root / f"warp_{atlas_idx:03d}"
+        warped = warp_label(atlas_segmen[atlas_idx], bs_tmaps[i], warp_dir)
+        warped_masks.append(warped)
 
-    result = {
-        "patient": test_idx,
-        "dice": round(dice, 4),
-        "jaccard": round(jacc, 4),
-        "hausdorff": round(hd, 4),
-        "rvd": round(rvd, 4),
-        "time_s": round(t_total, 1),
-        "bspline_used": n_bs,
-        "preselection": PRESELECTION_SIZE,
-        "atlases_used": [top_indices[i] for i in best5]
-    }
-    all_results.append(result)
+    fused_mask = vote_fusion(warped_masks)
 
-    print(f"\n  Dice: {dice:.4f}  Jaccard: {jacc:.4f}  HD: {hd:.2f}mm  RVD: {rvd:.4f}")
-    print(f"  Time: {t_total:.1f}s ({t_total/60:.1f}min)  BSpline: {n_bs}/{PRESELECTION_SIZE}")
-
-    # --- Save metrics JSON ---
-    json_path = SAVE_DIR / f"patient_{test_idx:03d}_metrics.json"
-    with open(json_path, "w") as f:
-        json.dump(result, f, indent=2)
-
-    # --- Save segmentation figure ---
-    fixed_np = sitk.GetArrayFromImage(fixed_img)
-    fused_np = sitk.GetArrayFromImage(binarize(fused_mask))
-    gt_np = sitk.GetArrayFromImage(binarize(gt_mask))
-
-    fig, axes = plt.subplots(1, 3, figsize=(16, 5.8), dpi=120)
-    fig.suptitle(
-        f"Patient {test_idx} — {ATLAS_SIZE} aff -> top {PRESELECTION_SIZE} -> BS -> best {FUSION_SIZE}\n"
-        f"Dice: {dice:.3f} | Jaccard: {jacc:.3f} | "
-        f"Hausdorff: {hd:.3f} mm | RVD: {rvd:.3f}", fontsize=14, y=0.97)
-    axes[0].imshow(fixed_np[VISUALISATION_SLICE], cmap="gray")
-    axes[0].set_title("Test image", fontsize=13, pad=8)
-    axes[0].set_xticks([]); axes[0].set_yticks([])
-    axes[1].imshow(fixed_np[VISUALISATION_SLICE], cmap="gray")
-    axes[1].imshow(np.ma.masked_where(fused_np[VISUALISATION_SLICE]==0,
-                    fused_np[VISUALISATION_SLICE]), cmap="Reds", alpha=0.4)
-    axes[1].set_title("Fused prediction", fontsize=13, pad=8)
-    axes[1].set_xticks([]); axes[1].set_yticks([])
-    axes[2].imshow(fixed_np[VISUALISATION_SLICE], cmap="gray")
-    axes[2].imshow(np.ma.masked_where(gt_np[VISUALISATION_SLICE]==0,
-                    gt_np[VISUALISATION_SLICE]), cmap="Reds", alpha=0.4)
-    axes[2].set_title("Ground truth mask", fontsize=13, pad=8)
-    axes[2].set_xticks([]); axes[2].set_yticks([])
-    fig.subplots_adjust(left=0.03, right=0.99, bottom=0.06, top=0.80, wspace=0.03)
-
-    fig.savefig(fig_path, bbox_inches="tight")
-    plt.close(fig)
-    print(f"  Saved: {fig_path}")
+    t_fuse_end = time.perf_counter()
+    print(f"Fusion done in {t_fuse_end - t_fuse_start:.1f}s")
 
 # ============================================================
-# Summary
+# Metrics
 # ============================================================
-if all_results:
-    dices = [r["dice"] for r in all_results]
-    print(f"\n{'='*60}")
-    print(f"  BATCH COMPLETE — {len(all_results)} patients processed")
-    print(f"{'='*60}")
-    print(f"  Mean Dice:   {np.mean(dices):.4f}")
-    print(f"  Median Dice: {np.median(dices):.4f}")
-    print(f"  Min Dice:    {min(dices):.4f}")
-    print(f"  Max Dice:    {max(dices):.4f}")
-    print(f"  Total time:  {time.perf_counter() - t0_global:.0f}s ({(time.perf_counter() - t0_global)/60:.1f}min)")
-else:
-    print("\nAll patients already processed — nothing to do.")
+dice = dice_score(fused_mask, gt_mask)
+jacc = jaccard_score(fused_mask, gt_mask)
+hd = hausdorff_distance_mm(fused_mask, gt_mask)
+rvd = relative_volume_difference(fused_mask, gt_mask)
+
+t_total = time.perf_counter() - t0
+
+print("\n" + "=" * 50)
+print(f"  PATIENT {TEST_PATIENT} — RESULTS")
+print("=" * 50)
+print(f"  Dice:      {dice:.4f}")
+print(f"  Jaccard:   {jacc:.4f}")
+print(f"  Hausdorff: {hd:.2f} mm")
+print(f"  RVD:       {rvd:.4f}")
+print(f"\n  Affine:  {t_aff_end - t_aff_start:.1f}s  ({ATLAS_SIZE} atlases)")
+print(f"  BSpline: {t_bs_end - t_bs_start:.1f}s  ({PRESELECTION_SIZE} atlases)")
+print(f"  Fusion:  {t_fuse_end - t_fuse_start:.1f}s")
+print(f"  TOTAL:   {t_total:.1f}s  ({t_total/60:.1f} min)")
+n_bs = sum(1 for s in used_stage if s == "BS")
+print(f"  BSpline used: {n_bs}/{PRESELECTION_SIZE}")
+
+# ============================================================
+# Save figure: test image + 5 atlas registered images (like the reference)
+# ============================================================
+SAVE_DIR.mkdir(parents=True, exist_ok=True)
+
+fixed_np = sitk.GetArrayFromImage(fixed_img)
+fused_np = sitk.GetArrayFromImage(binarize(fused_mask))
+gt_np = sitk.GetArrayFromImage(binarize(gt_mask))
+
+# Pick best slice (most prostate area)
+gt_slices = gt_np.sum(axis=(1, 2))
+sl = int(np.argmax(gt_slices))
+print(f"\n  Visualization slice: {sl}")
+
+# Layout: 2 rows x 3 cols = test image + 5 atlases
+n_cols = 3
+n_rows = 2
+fig, axes = plt.subplots(n_rows, n_cols, figsize=(5 * n_cols, 5.5 * n_rows), dpi=120)
+
+fig.suptitle(
+    f"Patient {TEST_PATIENT} — Top {PRESELECTION_SIZE} atlases, best {FUSION_SIZE} selected (by metric)",
+    fontsize=15, y=0.98)
+
+# First panel: test image
+ax = axes[0, 0]
+ax.imshow(fixed_np[sl], cmap="gray")
+ax.set_title("Test image", fontsize=12, pad=8)
+ax.set_xticks([]); ax.set_yticks([])
+
+# 5 atlas panels
+positions = [(0, 1), (0, 2), (1, 0), (1, 1), (1, 2)]
+
+for i, (row, col) in enumerate(positions):
+    ax = axes[row, col]
+    atlas_idx = top_indices[i]
+    stage = used_stage[i]
+    aff_m = top_metrics[i]
+    bs_m = bs_metrics[i]
+
+    # Show registered atlas image
+    ax.imshow(registered_images[i][sl], cmap="gray")
+
+    # Determine if this atlas was selected for fusion
+    is_selected = i in best5
+
+    # Build title
+    if bs_m is not None:
+        bs_str = f"{bs_m:.3f}"
+    else:
+        bs_str = "fail"
+
+    if stage == "BS" and is_selected:
+        title_color = "green"
+        status = "BS | SELECTED"
+    elif stage == "AFF" and is_selected:
+        title_color = "darkorange"
+        status = "AFF | SELECTED"
+    elif stage == "BS":
+        title_color = "gray"
+        status = "BS | not used"
+    else:
+        title_color = "gray"
+        status = "AFF | not used"
+
+    ax.set_title(
+        f"Atlas {atlas_idx:03d}\nAffine: {aff_m:.3f} | BS: {bs_str}\n{status}",
+        fontsize=10, pad=6, color=title_color, fontweight="bold")
+    ax.set_xticks([]); ax.set_yticks([])
+
+fig.subplots_adjust(left=0.02, right=0.98, bottom=0.02, top=0.88, wspace=0.08, hspace=0.25)
+
+fig_path = SAVE_DIR / f"patient_{TEST_PATIENT:03d}_atlas_detail.png"
+fig.savefig(fig_path, bbox_inches="tight", dpi=150)
+plt.close(fig)
+print(f"\nSaved: {fig_path}")
+
+print(f"\nDone! Total time: {time.perf_counter() - t0:.1f}s")
