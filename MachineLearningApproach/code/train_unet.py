@@ -1,5 +1,7 @@
 import random
 from pathlib import Path
+import joblib
+import numpy as np
 
 import torch
 from torch.utils.data import DataLoader
@@ -8,6 +10,7 @@ from tqdm import tqdm
 
 import u_net
 import utils
+import spadegan
 
 # to ensure reproducible training/validation split
 random.seed(42)
@@ -29,11 +32,12 @@ TENSORBOARD_LOGDIR = "segmentation_runs"
 # training settings and hyperparameters
 NO_VALIDATION_PATIENTS = 20
 IMAGE_SIZE = [64, 64]
-BATCH_SIZE = 32
+BATCH_SIZE = 64
 N_EPOCHS = 100
 LEARNING_RATE = 1e-4
 TOLERANCE = 0.01  # for early stopping
-AUG_FRACTION = 2.0  # how many augmented samples generated per original sample
+AUG_FRACTION = 1.0  # how many augmented samples generated per original sample
+SYN_FRACTION = 1.0
 
 # find patient folders in training directory
 # excluding hidden folders (start with .)
@@ -53,21 +57,27 @@ partition = {
 orig_dataset = utils.ProstateMRDataset(partition["train"], IMAGE_SIZE, valid=True)
 augm_dataset = utils.ProstateMRDataset(partition["train"], IMAGE_SIZE, valid=False)
 
-class AugmentedDataset(torch.utils.data.Dataset):
-    def __init__(self, dataset, repeats):
-        self.dataset = dataset
-        self.repeats = max(0, int(repeats))
 
-    def __len__(self):
-        return len(self.dataset) * (self.repeats)
-    
-    def __getitem__(self, idx):
-        return self.dataset[idx % len(self.dataset)]
+gen_model = spadegan.SPADE_GAN()
+gen_model.load_state_dict(torch.load("SPADE_model_weights/SpadeBestModel.pth"))
+
+# load PCA
+pca = joblib.load("SPADE_model_weights/latent_pca.joblib")
+pca_region = []
+synthetic_dataset = utils.MaskToImageSyntheticDataset(
+    pca,
+    orig_dataset,
+    gen_model.generator,
+    device=device,
+    repeats=SYN_FRACTION,
+    pc1_range=[-5,5],
+    pc2_range=[-5,5]
+)
     
 # create augmented dataset with repeated samples (training data)
-augm_dataset = AugmentedDataset(augm_dataset, repeats=AUG_FRACTION)
+augm_dataset = utils.AugmentedDataset(augm_dataset, repeats=AUG_FRACTION)
 
-full_dataset = torch.utils.data.ConcatDataset([orig_dataset, augm_dataset])
+full_dataset = torch.utils.data.ConcatDataset([orig_dataset, augm_dataset, synthetic_dataset])
 
 dataloader = DataLoader(
     full_dataset, 

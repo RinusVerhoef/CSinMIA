@@ -4,6 +4,7 @@ from pathlib import Path
 from torch.utils.data import DataLoader
 from sklearn.decomposition import PCA
 import matplotlib.pyplot as plt
+import joblib
 
 from spadegan import SPADE_GAN
 from utils import ProstateMRDataset
@@ -12,7 +13,11 @@ from utils import ProstateMRDataset
 IMAGE_SIZE = [64, 64]
 BATCH_SIZE = 16
 DATA_DIR = Path("prostate158_train/train")
+<<<<<<< Updated upstream
 WEIGHTS = Path("SPADE_model_weights/SpadeBestModel.pth")
+=======
+WEIGHTS = Path("SPADE_model_weights/SpadeFinalModel.pth")
+>>>>>>> Stashed changes
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -60,6 +65,11 @@ latents = np.concatenate(latents, axis=0)
 # PCA
 pca = PCA(n_components=2)
 xy = pca.fit_transform(latents)
+
+PCA_PATH = Path("SPADE_model_weights/latent_pca.joblib")
+joblib.dump(pca, PCA_PATH)
+np.save("SPADE_model_weights/latents.npy", latents)
+np.save("SPADE_model_weights/latents_pca.npy", xy)
 
 plt.figure(figsize=(10,10))
 scatter = plt.scatter(xy[:,0], xy[:,1], c=patient_ids, cmap='tab20', s=10)
