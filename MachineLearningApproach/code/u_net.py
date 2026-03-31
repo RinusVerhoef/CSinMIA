@@ -173,7 +173,7 @@ class UNet(nn.Module):
             "Number of decoder stages must equal number of encoder poolings: "
             f"got len(dec_chs)={len(dec_chs)} vs len(enc_chs)-1={len(enc_chs)-1}"
         )
-    def forward(self, x):
+    def forward(self, x, return_latent=False):
         """Performs the forward pass of the unet.
        
         Parameters
@@ -188,7 +188,10 @@ class UNet(nn.Module):
         """
        
         enc_ftrs = self.encoder(x)
-        x = self.decoder(enc_ftrs[-1], enc_ftrs)
+        latent = enc_ftrs[-1]       # latent vector
+        x = self.decoder(latent, enc_ftrs)
         out = self.head(x)
+        if return_latent:
+            return out, latent
         return out
 
