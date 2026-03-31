@@ -25,23 +25,48 @@ class ProstateMRDataset(torch.utils.data.Dataset):
         self.mask_list = []
         # load images
         self.no_slices = 24
+
         for path in paths:
-            im = sitk.GetArrayFromImage(sitk.ReadImage(path / "t2.nii.gz")).astype(
-                np.int32
-            )
+            # Load image
+            im = sitk.GetArrayFromImage(
+                sitk.ReadImage(path / "t2.nii.gz")
+            ).astype(np.int32)
             Ns = im.shape[0]
-            self.mr_image_list.append(
-                sitk.GetArrayFromImage(sitk.ReadImage(path / "t2.nii.gz")).astype(
-                    np.int32
-                )[Ns // 2 - self.no_slices // 2 : Ns // 2 + self.no_slices // 2, ...]
-            )
-            self.mask_list.append(
-                sitk.GetArrayFromImage(
-                    sitk.ReadImage(path / "t2_anatomy_reader1.nii.gz")
-                ).astype(np.int32)[
-                    Ns // 2 - self.no_slices // 2 : Ns // 2 + self.no_slices // 2, ...
-                ]
-            )
+
+            # Load mask
+            mask = sitk.GetArrayFromImage(
+                sitk.ReadImage(path / "t2_anatomy_reader1.nii.gz")
+            ).astype(np.int32)
+
+            # Skip patients with too few slices
+            if Ns < self.no_slices:
+                continue
+
+            mid = Ns // 2
+            start = mid - self.no_slices // 2
+            end   = mid + self.no_slices // 2
+
+            # Append both image and mask slices (same indices)
+            self.mr_image_list.append(im[start:end, ...])
+            self.mask_list.append(mask[start:end, ...])
+
+        # for path in paths:
+        #     im = sitk.GetArrayFromImage(sitk.ReadImage(path / "t2.nii.gz")).astype(
+        #         np.int32
+        #     )
+        #     Ns = im.shape[0]
+        #     self.mr_image_list.append(
+        #         sitk.GetArrayFromImage(sitk.ReadImage(path / "t2.nii.gz")).astype(
+        #             np.int32
+        #         )[Ns // 2 - self.no_slices // 2 : Ns // 2 + self.no_slices // 2, ...]
+        #     )
+        #     self.mask_list.append(
+        #         sitk.GetArrayFromImage(
+        #             sitk.ReadImage(path / "t2_anatomy_reader1.nii.gz")
+        #         ).astype(np.int32)[
+        #             Ns // 2 - self.no_slices // 2 : Ns // 2 + self.no_slices // 2, ...
+        #         ]
+        #     )
 
         # number of patients and slices in the dataset
         self.no_patients = len(self.mr_image_list)
