@@ -24,25 +24,25 @@ else:
     device = torch.device("cpu")
 
 DATA_DIR = Path.cwd() / "prostate158_train" / "train"
-CHECKPOINTS_DIR = Path.cwd() / "vae_model_weights"
+CHECKPOINTS_DIR = Path.cwd() / "SPADE_model_weights"
 CHECKPOINTS_DIR.mkdir(parents=True, exist_ok=True)
-TENSORBOARD_LOGDIR = "vae_runs"
+TENSORBOARD_LOGDIR = "SPADE_runs"
 
 # training settings and hyperparameters
 NO_VALIDATION_PATIENTS = 20
 IMAGE_SIZE = [64, 64]
 BATCH_SIZE = 64
-N_EPOCHS = 500
+N_EPOCHS = 200
 DECAY_LR_AFTER = 100
 LEARNING_RATE = 1e-4
-DISPLAY_FREQ = 1
+DISPLAY_FREQ = 10
 
 # dimension of VAE latent space
 Z_DIM = 128
 
 LAMBDA_REC = 10.0
-LAMBDA_KL = 2.0
-LAMBDA_GAN = 1.0
+LAMBDA_KL = 3.0
+LAMBDA_GAN = 3.0
 
 
 # function to reduce the
@@ -102,7 +102,7 @@ optimizer_G = torch.optim.Adam(
 
 optimizer_D = torch.optim.Adam(
     model.discriminator.parameters(),
-    lr=LEARNING_RATE * 0.6,
+    lr=LEARNING_RATE * 0.8,
     betas=(0.5, 0.999),
 )
 
