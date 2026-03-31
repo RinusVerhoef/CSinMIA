@@ -12,7 +12,11 @@ ParameterFiles/BSpline/.claude/worktrees/interesting-carson/
 ParameterFiles/BSpline/.claude/worktrees/affectionate-keller/
 segmentation_model_weights/
 segmentation_runs/
+<<<<<<< HEAD
 ParameterFiles/BSpline/.claude/worktrees/silly-archimedes/
 ParameterFiles/BSpline/.claude/worktrees/magical-pike/
 ParameterFiles/BSpline/.claude/worktrees/serene-curie/
 ParameterFiles/BSpline/.claude/worktrees/heuristic-blackburn/
+=======
+/prostate158_test
+>>>>>>> 88bc7563e5000fbaf9a37506ab3960aed66ac692
