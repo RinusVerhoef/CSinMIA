@@ -70,8 +70,8 @@ synthetic_dataset = utils.MaskToImageSyntheticDataset(
     gen_model.generator,
     device=device,
     repeats=SYN_FRACTION,
-    pc1_range=[-5,5],
-    pc2_range=[-5,5]
+    pc1_range=[-4,2],
+    pc2_range=[-5,1]
 )
     
 # create augmented dataset with repeated samples (training data)
