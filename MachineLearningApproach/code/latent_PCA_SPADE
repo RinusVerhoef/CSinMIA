@@ -12,7 +12,7 @@ from utils import ProstateMRDataset
 IMAGE_SIZE = [64, 64]
 BATCH_SIZE = 16
 DATA_DIR = Path("prostate158_train/train")
-WEIGHTS = Path("vae_model_weights/SpadeBestModel.pth")
+WEIGHTS = Path("SPADE_model_weights/SpadeBestModel.pth")
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
