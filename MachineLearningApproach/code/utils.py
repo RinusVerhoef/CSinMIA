@@ -25,23 +25,48 @@ class ProstateMRDataset(torch.utils.data.Dataset):
         self.mask_list = []
         # load images
         self.no_slices = 24
+
         for path in paths:
-            im = sitk.GetArrayFromImage(sitk.ReadImage(path / "t2.nii.gz")).astype(
-                np.int32
-            )
+            # Load image
+            im = sitk.GetArrayFromImage(
+                sitk.ReadImage(path / "t2.nii.gz")
+            ).astype(np.int32)
             Ns = im.shape[0]
-            self.mr_image_list.append(
-                sitk.GetArrayFromImage(sitk.ReadImage(path / "t2.nii.gz")).astype(
-                    np.int32
-                )[Ns // 2 - self.no_slices // 2 : Ns // 2 + self.no_slices // 2, ...]
-            )
-            self.mask_list.append(
-                sitk.GetArrayFromImage(
-                    sitk.ReadImage(path / "t2_anatomy_reader1.nii.gz")
-                ).astype(np.int32)[
-                    Ns // 2 - self.no_slices // 2 : Ns // 2 + self.no_slices // 2, ...
-                ]
-            )
+
+            # Load mask
+            mask = sitk.GetArrayFromImage(
+                sitk.ReadImage(path / "t2_anatomy_reader1.nii.gz")
+            ).astype(np.int32)
+
+            # Skip patients with too few slices
+            if Ns < self.no_slices:
+                continue
+
+            mid = Ns // 2
+            start = mid - self.no_slices // 2
+            end   = mid + self.no_slices // 2
+
+            # Append both image and mask slices (same indices)
+            self.mr_image_list.append(im[start:end, ...])
+            self.mask_list.append(mask[start:end, ...])
+
+        # for path in paths:
+        #     im = sitk.GetArrayFromImage(sitk.ReadImage(path / "t2.nii.gz")).astype(
+        #         np.int32
+        #     )
+        #     Ns = im.shape[0]
+        #     self.mr_image_list.append(
+        #         sitk.GetArrayFromImage(sitk.ReadImage(path / "t2.nii.gz")).astype(
+        #             np.int32
+        #         )[Ns // 2 - self.no_slices // 2 : Ns // 2 + self.no_slices // 2, ...]
+        #     )
+        #     self.mask_list.append(
+        #         sitk.GetArrayFromImage(
+        #             sitk.ReadImage(path / "t2_anatomy_reader1.nii.gz")
+        #         ).astype(np.int32)[
+        #             Ns // 2 - self.no_slices // 2 : Ns // 2 + self.no_slices // 2, ...
+        #         ]
+        #     )
 
         # number of patients and slices in the dataset
         self.no_patients = len(self.mr_image_list)
@@ -176,3 +201,58 @@ class DiceBCELoss(nn.Module):
         BCE = nn.functional.binary_cross_entropy(outputs, targets, reduction="mean")
 
         return BCE + dice_loss
+
+class AugmentedDataset(torch.utils.data.Dataset):
+    def __init__(self, dataset, repeats):
+        self.dataset = dataset
+        self.repeats = max(0, int(repeats))
+
+    def __len__(self):
+        return len(self.dataset) * (self.repeats)
+    
+    def __getitem__(self, idx):
+        return self.dataset[idx % len(self.dataset)]
+
+
+class MaskToImageSyntheticDataset(torch.utils.data.Dataset):
+    def __init__(self, pca, base_dataset, generator, device="cpu", repeats=1,
+                 pc1_range=(-5, 5), pc2_range=(-5, 5)):
+        self.pca = pca
+        self.base_dataset = base_dataset
+        self.generator = generator
+        self.device = device
+        self.repeats = int(repeats)
+        self.pc1_range = pc1_range
+        self.pc2_range = pc2_range
+
+        self.generator.to(self.device)
+        self.generator.eval()
+
+    def __len__(self):
+        return len(self.base_dataset) * self.repeats
+
+    def __getitem__(self, idx):
+        _, mask = self.base_dataset[idx % len(self.base_dataset)]
+
+        if mask.ndim == 2:
+            mask_in = mask.unsqueeze(0).unsqueeze(0).to(self.device).float()
+        else:
+            mask_in = mask.unsqueeze(0).to(self.device).float()
+
+        # sample random point in PCA space
+        pc1 = np.random.uniform(self.pc1_range[0], self.pc1_range[1])
+        pc2 = np.random.uniform(self.pc2_range[0], self.pc2_range[1])
+
+        # create PCA-space vector
+        pca_point = np.zeros((1, self.pca.n_components_))
+        pca_point[0, 0] = pc1
+        pca_point[0, 1] = pc2
+
+        # map back to latent space
+        z_np = self.pca.inverse_transform(pca_point)
+        z = torch.from_numpy(z_np).float().to(self.device)
+
+        with torch.no_grad():
+            synth_img = self.generator(z, mask_in)
+
+        return synth_img.squeeze(0).cpu(), mask
